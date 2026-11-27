@@ -1,0 +1,52 @@
+{
+  "target": {
+    "type": "project",
+    "project_id": "example-prod"
+  },
+  "data": {
+    "datasets": [
+      {
+        "datasetReference": {
+          "datasetId": "analytics",
+          "projectId": "example-prod"
+        }
+      }
+    ],
+    "tables": [
+      [
+        {
+          "tableReference": {
+            "datasetId": "analytics",
+            "tableId": "events",
+            "projectId": "example-prod"
+          },
+          "type": "TABLE"
+        }
+      ]
+    ],
+    "table_details": [
+      {
+        "tableReference": {
+          "datasetId": "analytics",
+          "tableId": "events",
+          "projectId": "example-prod"
+        },
+        "type": "TABLE"
+      }
+    ]
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gcp-7.2",
+      "resource_key": "projects/example-prod/analytics.events",
+      "status": "FAIL"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "datasets": "schema",
+      "tables": "schema",
+      "table_details": "schema"
+    }
+  }
+}

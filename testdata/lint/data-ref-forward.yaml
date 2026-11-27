@@ -1,0 +1,34 @@
+# Lint fixture: the only defect is a foreach expression that reads the result of a step that is
+# collected after it.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-data-ref-forward-1
+    ref: "1.1"
+    title: Fixture that reads a step collected later
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [iam.googleapis.com]
+    collect:
+      - id: keys
+        foreach: data.accounts
+        as: sa
+        gcloud: iam service-accounts keys list --iam-account={{ .sa.email }} --managed-by=user --format=json
+      - id: accounts
+        gcloud: iam service-accounts list --project={{ .project }} --format=json
+    resource:
+      from: data.accounts
+      kind: iam.googleapis.com/ServiceAccount
+      name: r.email
+    check:
+      assert: size(data.keys) == 0
+      message: "Service account {{ .r.email }} has user-managed keys"
+    remediation: Delete the keys.
+    notes: Fixture for the lint tests.

@@ -1,0 +1,189 @@
+# Command allowlist. It is embedded in the binary and enforced on the final argv of every command a
+# scan runs. Rules, profiles and flags cannot extend it. It decides what the scanning identity may
+# execute, so a change here is reviewed like a change to a rule.
+#
+# gcloud and engine_gcloud list complete command paths. A path admits a command line when its words
+# are the first words of the arguments, compared whole, so "compute instances delete list" does not
+# match "compute instances list". gcloud holds the commands rules may run, in alphabetical order so
+# that a change is a small diff. engine_gcloud holds the commands only the engine runs.
+#
+# bind lists the kinds of target binding a use of the command may have:
+#   project       --project=<target>, or the first positional argument is the target project
+#   organization  --organization=<org>, the first positional argument is the organization, or
+#                 --filter contains parent.id=<org>
+#   derived       the value comes from the data of an earlier step of the same unit; allowed in a
+#                 foreach step only
+#   none          a local command that refers to no target
+#
+# Flags are a positive list for each tool (gcloud_flags, kubectl_flags). A word that starts with "-"
+# is allowed only when its name, the text before any "=", is on the list; nothing else that starts
+# with "-" is, whatever it is called. A list of forbidden names can never be complete: gcloud has
+# hidden global flags and a short flag (-q), and kubectl has short flags that attach to their value.
+# The forbidden lists name the flags that must never appear, so that a rejection can say why; they
+# win over the positive lists. All of this is about the flags a rule writes in its own command. The
+# flags the engine adds to its own calls (for gcloud --quiet, --format, the account, impersonation
+# and quota project; for kubectl the kubeconfig and the request timeout) are not subject to it, so
+# the check runs on the rule's words before the engine adds anything.
+
+gcloud:
+  - {path: "access-approval settings get", bind: [project]}
+  - {path: "access-context-manager perimeters list", bind: [derived]}
+  - {path: "access-context-manager policies list", bind: [organization]}
+  - {path: "app versions describe", bind: [project]}
+  - {path: "app versions list", bind: [project]}
+  - {path: "artifacts repositories get-iam-policy", bind: [project]}
+  - {path: "artifacts repositories list", bind: [project]}
+  - {path: "compute backend-services list", bind: [project]}
+  - {path: "compute disks list", bind: [project]}
+  - {path: "compute firewall-rules list", bind: [project]}
+  - {path: "compute forwarding-rules list", bind: [project]}
+  - {path: "compute instances list", bind: [project]}
+  - {path: "compute networks get-effective-firewalls", bind: [project]}
+  - {path: "compute networks list", bind: [project]}
+  - {path: "compute networks subnets describe", bind: [project]}
+  - {path: "compute networks subnets list", bind: [project]}
+  - {path: "compute os-config inventories list", bind: [project]}
+  - {path: "compute project-info describe", bind: [project]}
+  - {path: "compute regions list", bind: [project]}
+  - {path: "compute ssl-policies list", bind: [project]}
+  - {path: "compute target-https-proxies list", bind: [project]}
+  - {path: "compute target-ssl-proxies list", bind: [project]}
+  - {path: "container binauthz policy export", bind: [project]}
+  - {path: "dataproc clusters list", bind: [project]}
+  - {path: "dns managed-zones list", bind: [project]}
+  - {path: "dns policies list", bind: [project]}
+  - {path: "essential-contacts list", bind: [organization]}
+  - {path: "functions list", bind: [project]}
+  - {path: "iam service-accounts keys list", bind: [derived]}
+  - {path: "iam service-accounts list", bind: [project]}
+  - {path: "kms keyrings list", bind: [project]}
+  - {path: "kms keys get-iam-policy", bind: [project]}
+  - {path: "kms keys list", bind: [project]}
+  - {path: "kms locations list", bind: [project]}
+  - {path: "logging logs list", bind: [project]}
+  - {path: "logging metrics list", bind: [project]}
+  - {path: "logging read", bind: [organization]}
+  - {path: "logging sinks list", bind: [project, organization]}
+  - {path: "monitoring policies list", bind: [project]}
+  - {path: "org-policies describe", bind: [project]}
+  - {path: "organizations get-iam-policy", bind: [organization]}
+  - {path: "projects get-iam-policy", bind: [project]}
+  - {path: "projects list", bind: [organization]}
+  - {path: "resource-manager folders list", bind: [organization, derived]}
+  - {path: "services api-keys list", bind: [project]}
+  - {path: "services list", bind: [project]}
+  - {path: "sql instances list", bind: [project]}
+  - {path: "sql users list", bind: [project]}
+  - {path: "storage buckets get-iam-policy", bind: [derived]}
+  - {path: "storage buckets list", bind: [project]}
+
+# "--version" is a whole command line, not a prefix: it admits "gcloud --version" and nothing else.
+engine_gcloud:
+  - {path: "--version", bind: [none]}
+  - {path: "config get account", bind: [none]}
+  - {path: "auth print-access-token", bind: [none]}
+  - {path: "projects describe", bind: [project]}
+  - {path: "projects get-ancestors", bind: [project]}
+  - {path: "organizations describe", bind: [organization]}
+  - {path: "container clusters list", bind: [project]}
+
+# The flags a gcloud step may contain, in alphabetical order.
+gcloud_flags:
+  - "--effective"
+  - "--enabled"
+  - "--filter"
+  - "--folder"
+  - "--format"
+  - "--freshness"
+  - "--iam-account"
+  - "--instance"
+  - "--keyring"
+  - "--limit"
+  - "--location"
+  - "--managed-by"
+  - "--organization"
+  - "--policy"
+  - "--project"
+  - "--region"
+  - "--service"
+  - "--view"
+
+# A kubectl step is "<verb> <resource> [flags]". The resource is checked for every verb except
+# api-resources and version, which take none.
+kubectl_verbs: [get, api-resources, version]
+
+kubectl_resources:
+  - nodes
+  - clusterrolebindings
+  - rolebindings
+  - clusterroles
+  - roles
+  - serviceaccounts
+  - pods
+  - namespaces
+  - crd
+  - networkpolicies
+  - resourcequotas
+  - limitranges
+  - ingresses
+  - managedcertificates.networking.gke.io
+  - daemonsets
+  - storageclasses
+  - replicasets
+
+# The flags a kubectl step may contain.
+kubectl_flags: ["-o", "--all-namespaces", "--namespace"]
+
+# REST hosts and the methods allowed on each. Calls use https, without userinfo or a port. POST is
+# also allowed when the URL path ends in one of rest_post_suffixes, the custom methods that only
+# read.
+rest:
+  - {host: "bigquery.googleapis.com", methods: [GET]}
+  - {host: "admin.googleapis.com", methods: [GET]}
+  - {host: "dlp.googleapis.com", methods: [GET]}
+
+rest_post_suffixes:
+  - ":getIamPolicy"
+  - ":search"
+  - ":testIamPermissions"
+  - ":getEffectivePolicy"
+  - ":getEffectiveIamPolicy"
+
+# Flags that set identity, endpoint or debug behavior, or that pull in settings from elsewhere
+# (--configuration, --flags-file). The engine controls these; a rule that sets one could change
+# whose credentials a command uses, where it connects, or what gets logged. gcloud also has hidden
+# global flags of this kind: --credential-file-override replaces the credentials,
+# --authority-selector and --authorization-token-file inject authorization headers, and
+# --universe-domain changes the API domain.
+forbidden_gcloud_flags:
+  - "--account"
+  - "--impersonate-service-account"
+  - "--access-token-file"
+  - "--configuration"
+  - "--log-http"
+  - "--flags-file"
+  - "--billing-project"
+  - "--verbosity"
+  - "--trace-token"
+  - "--authority-selector"
+  - "--authorization-token-file"
+  - "--credential-file-override"
+  - "--universe-domain"
+
+forbidden_kubectl_flags:
+  - "--kubeconfig"
+  - "--context"
+  - "--server"
+  - "--token"
+  - "--as"
+  - "--as-group"
+  - "--insecure-skip-tls-verify"
+  - "--certificate-authority"
+  - "--client-certificate"
+  - "--client-key"
+  - "--username"
+  - "--password"
+  - "--cluster"
+  - "--user"
+  - "--cache-dir"
+  - "--request-timeout"

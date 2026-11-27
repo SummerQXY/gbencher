@@ -1,0 +1,627 @@
+dsl_version: 1
+benchmark:
+  id: cis-gcp-foundation
+  version: "5.0.0"
+  section: "4"
+  title: Virtual Machines
+rules:
+  - id: cis-gcp-4.1
+    ref: "4.1"
+    title: Ensure That Instances Are Not Configured To Use the Default Service Account
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      filter: '!(params.exclude_gke_nodes && r.name.startsWith("gke-") && "goog-gke-node" in r.?labels.orValue({}))'
+      kind: compute.googleapis.com/Instance
+      name: '"zones/" + r.zone.substring(r.zone.lastIndexOf("/") + 1) + "/instances/" + r.name'
+    params:
+      exclude_gke_nodes: true
+    check:
+      assert: |
+        !r.?serviceAccounts.orValue([]).exists(sa,
+          sa.?email.orValue("").endsWith("-compute@developer.gserviceaccount.com")
+          || sa.?email.orValue("").endsWith("@appspot.gserviceaccount.com"))
+      message: "Instance {{ .r.name }} uses the Compute Engine or App Engine default service account"
+    evidence:
+      - 'r.?serviceAccounts.orValue([]).map(sa, sa.?email.orValue(""))'
+    remediation: |
+      gcloud compute instances stop <INSTANCE_NAME> --zone=<ZONE>
+      gcloud compute instances set-service-account <INSTANCE_NAME> --zone=<ZONE> --service-account=<SERVICE_ACCOUNT>
+      gcloud compute instances start <INSTANCE_NAME> --zone=<ZONE>
+    references:
+      - https://cloud.google.com/compute/docs/access/service-accounts
+      - https://cloud.google.com/compute/docs/access/create-enable-service-accounts-for-instances
+    notes: |
+      Mirrors the CIS CLI audit on serviceAccounts[].email. The Compute Engine default account
+      (ctx.project_number + "-compute@developer.gserviceaccount.com") is matched by its
+      "-compute@developer.gserviceaccount.com" suffix and the App Engine default account by
+      "@appspot.gserviceaccount.com", so default accounts borrowed from other projects also fail.
+      Instances without a service account pass. GKE nodes (name prefix gke- and label goog-gke-node)
+      are excluded per the CIS exception; set exclude_gke_nodes=false to include them. Whether the
+      default account still holds roles/editor is not evaluated, matching CIS.
+
+  - id: cis-gcp-4.2
+    ref: "4.2"
+    title: Ensure That Instances Are Not Configured To Use the Default Service Account With Full Access to All Cloud APIs
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      filter: '!(params.exclude_gke_nodes && r.name.startsWith("gke-") && "goog-gke-node" in r.?labels.orValue({}))'
+      kind: compute.googleapis.com/Instance
+      name: '"zones/" + r.zone.substring(r.zone.lastIndexOf("/") + 1) + "/instances/" + r.name'
+    params:
+      exclude_gke_nodes: true
+    check:
+      assert: |
+        !r.?serviceAccounts.orValue([]).exists(sa,
+          (sa.?email.orValue("").endsWith("-compute@developer.gserviceaccount.com")
+            || sa.?email.orValue("").endsWith("@appspot.gserviceaccount.com"))
+          && "https://www.googleapis.com/auth/cloud-platform" in sa.?scopes.orValue([]))
+      message: "Instance {{ .r.name }} uses a default service account with the cloud-platform scope (full access to all Cloud APIs)"
+    evidence:
+      - 'r.?serviceAccounts.orValue([])'
+    remediation: |
+      gcloud compute instances stop <INSTANCE_NAME> --zone=<ZONE>
+      gcloud compute instances set-service-account <INSTANCE_NAME> --zone=<ZONE> --service-account=<SERVICE_ACCOUNT> --scopes=<SCOPE1>,<SCOPE2>
+      gcloud compute instances start <INSTANCE_NAME> --zone=<ZONE>
+    references:
+      - https://cloud.google.com/compute/docs/access/create-enable-service-accounts-for-instances
+      - https://cloud.google.com/compute/docs/access/service-accounts
+    notes: |
+      Fails when a default service account (Compute Engine "-compute@developer.gserviceaccount.com"
+      or App Engine "@appspot.gserviceaccount.com") is attached with the scope
+      https://www.googleapis.com/auth/cloud-platform ("Allow full access to all Cloud APIs").
+      The CIS CLI step 2 repeats the 4.1 email check; the title and console audit define the combined
+      default-account-plus-full-scope condition used here, and 4.1 covers the account alone. Custom
+      service accounts are not evaluated because their access is governed by IAM roles rather than
+      scopes (CIS Additional Information). GKE nodes are excluded per the CIS exception
+      (exclude_gke_nodes).
+
+  - id: cis-gcp-4.3
+    ref: "4.3"
+    title: Ensure “Block Project-Wide SSH Keys” Is Enabled for VM Instances
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+      - id: project_info
+        gcloud: compute project-info describe --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      filter: '!(params.exclude_gke_nodes && r.name.startsWith("gke-") && "goog-gke-node" in r.?labels.orValue({}))'
+      kind: compute.googleapis.com/Instance
+      name: '"zones/" + r.zone.substring(r.zone.lastIndexOf("/") + 1) + "/instances/" + r.name'
+    params:
+      exclude_gke_nodes: false
+    check:
+      assert: |
+        r.?metadata.?items.orValue([]).exists(m,
+          m.key == "block-project-ssh-keys" && m.?value.orValue("").lowerAscii() in ["true", "1", "t"])
+        || (r.?metadata.?items.orValue([]).exists(m, m.key == "enable-oslogin")
+              ? r.metadata.items
+              : data.project_info.?commonInstanceMetadata.?items.orValue([])
+           ).exists(m, m.key == "enable-oslogin" && m.?value.orValue("").lowerAscii() in ["true", "1", "t"])
+      message: "Instance {{ .r.name }} does not set block-project-ssh-keys=TRUE and OS Login is not enabled for it"
+    evidence:
+      - 'r.?metadata.?items.orValue([]).filter(m, m.key in ["block-project-ssh-keys", "enable-oslogin"])'
+      - 'data.project_info.?commonInstanceMetadata.?items.orValue([]).filter(m, m.key == "enable-oslogin")'
+    remediation: |
+      gcloud compute instances add-metadata <INSTANCE_NAME> --zone=<ZONE> --metadata=block-project-ssh-keys=TRUE
+      or enable OS Login: gcloud compute project-info add-metadata --metadata=enable-oslogin=TRUE
+    references:
+      - https://cloud.google.com/compute/docs/instances/adding-removing-ssh-keys
+    notes: |
+      Passes when instance metadata block-project-ssh-keys is true (case-insensitive; "1" and "t" are
+      accepted as the guest agent's boolean parser does), or when OS Login is in effect for the
+      instance: the instance enable-oslogin value when set, otherwise the project
+      commonInstanceMetadata value. CIS Additional Information states that metadata SSH keys are
+      ignored under OS Login. The default is not blocked, so a missing key fails. The v5.0.0 text of
+      this recommendation states no GKE exception, so exclude_gke_nodes defaults to false; set it to
+      true when GKE node access is governed through the GKE benchmark. The requireOsLogin org policy
+      is not treated as OS Login in effect because it only seeds project metadata in projects created
+      after enforcement (see 4.4).
+
+  - id: cis-gcp-4.4
+    ref: "4.4"
+    title: Ensure Oslogin Is Enabled for a Project
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: project_info
+        gcloud: compute project-info describe --project={{ .project }} --format=json
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+      - id: oslogin_policy
+        gcloud: org-policies describe constraints/compute.requireOsLogin --project={{ .project }} --effective --format=json
+        on_error: empty
+    params:
+      exclude_gke_nodes: true
+    check:
+      assert: |
+        (
+          data.project_info.?commonInstanceMetadata.?items.orValue([]).exists(m,
+            m.key == "enable-oslogin" && m.?value.orValue("").lowerAscii() in ["true", "1", "t"])
+          || data.oslogin_policy.?spec.?rules.orValue([]).exists(x,
+               x.?enforce.orValue(false) && !has(x.condition))
+        )
+        && !data.instances.exists(i,
+             !(params.exclude_gke_nodes && i.name.startsWith("gke-") && "goog-gke-node" in i.?labels.orValue({}))
+             && i.?metadata.?items.orValue([]).exists(m,
+                  m.key == "enable-oslogin" && m.?value.orValue("").lowerAscii() in ["false", "0", "f"]))
+      review_when: |
+        !data.project_info.?commonInstanceMetadata.?items.orValue([]).exists(m,
+          m.key == "enable-oslogin" && m.?value.orValue("").lowerAscii() in ["true", "1", "t"])
+      message: "Project metadata does not set enable-oslogin=TRUE, or a non-GKE instance overrides it with enable-oslogin=FALSE"
+      review_message: "Only the effective org policy constraints/compute.requireOsLogin indicates OS Login; project metadata lacks enable-oslogin=TRUE. The constraint adds that key only to projects created after it was enforced, so confirm OS Login is in effect or add the project metadata"
+    evidence:
+      - 'data.project_info.?commonInstanceMetadata.?items.orValue([]).filter(m, m.key == "enable-oslogin")'
+      - 'data.instances.filter(i, i.?metadata.?items.orValue([]).exists(m, m.key == "enable-oslogin" && m.?value.orValue("").lowerAscii() in ["false", "0", "f"])).map(i, i.name)'
+      - 'data.oslogin_policy.?spec.?rules.orValue([])'
+    remediation: |
+      gcloud compute project-info add-metadata --project=<PROJECT_ID> --metadata=enable-oslogin=TRUE
+      gcloud compute instances remove-metadata <INSTANCE_NAME> --zone=<ZONE> --keys=enable-oslogin
+    references:
+      - https://cloud.google.com/compute/docs/instances/managing-instance-access
+      - https://cloud.google.com/sdk/gcloud/reference/compute/instances/remove-metadata
+    notes: |
+      Aggregate rule for the project, as in the CIS audit: project commonInstanceMetadata must set
+      enable-oslogin to TRUE (case-insensitive) and no instance may override it with FALSE
+      (false/0/f). GKE nodes are excluded from the override check per the CIS exception
+      (exclude_gke_nodes). The effective org policy constraints/compute.requireOsLogin (an
+      unconditional enforce rule) is read as a supporting signal: when it is enforced but the project
+      metadata key is missing the result is REVIEW, because the constraint writes enable-oslogin=true
+      only into projects created after enforcement and rejects later FALSE values, which does not
+      prove OS Login is active in older projects. The org-policy step uses on_error: empty, so a
+      disabled Org Policy API only removes that signal; a permission error on it still makes the rule
+      SKIPPED.
+
+  - id: cis-gcp-4.5
+    ref: "4.5"
+    title: Ensure ‘Enable Connecting to Serial Ports’ Is Not Enabled for VM Instance
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+      - id: project_info
+        gcloud: compute project-info describe --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: '"zones/" + r.zone.substring(r.zone.lastIndexOf("/") + 1) + "/instances/" + r.name'
+    check:
+      assert: |
+        (r.?metadata.?items.orValue([]).exists(m, m.key == "serial-port-enable")
+          ? r.metadata.items
+          : data.project_info.?commonInstanceMetadata.?items.orValue([])
+        ).filter(m, m.key == "serial-port-enable")
+         .all(m, m.?value.orValue("").lowerAscii() in ["", "false", "0", "f"])
+      message: "Instance {{ .r.name }} has interactive serial port access enabled (serial-port-enable set on the instance or inherited from project metadata)"
+    evidence:
+      - 'r.?metadata.?items.orValue([]).filter(m, m.key == "serial-port-enable")'
+      - 'data.project_info.?commonInstanceMetadata.?items.orValue([]).filter(m, m.key == "serial-port-enable")'
+    remediation: |
+      gcloud compute instances add-metadata <INSTANCE_NAME> --zone=<ZONE> --metadata=serial-port-enable=false
+      when inherited from the project: gcloud compute project-info remove-metadata --keys=serial-port-enable
+      Prevention: enforce the org policy constraint compute.disableSerialPortAccess
+    references:
+      - https://cloud.google.com/compute/docs/instances/interacting-with-serial-console
+    notes: |
+      The effective setting is the instance metadata serial-port-enable when present, otherwise the
+      project commonInstanceMetadata value. Compliant only when unset or false/0 (an empty value is
+      treated as unset), matching the CIS audit; any other value fails. The default is disabled, so a
+      missing key passes. The org policy constraint compute.disableSerialPortAccess (CIS Prevention)
+      is not read; where it is enforced the metadata has no effect and remaining findings can be
+      exempted in the profile. The CIS text states no GKE exception.
+
+  - id: cis-gcp-4.6
+    ref: "4.6"
+    title: Ensure That IP Forwarding Is Not Enabled on Instances
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      filter: '!(params.exclude_gke_nodes && r.name.startsWith("gke-") && "goog-gke-node" in r.?labels.orValue({}))'
+      kind: compute.googleapis.com/Instance
+      name: '"zones/" + r.zone.substring(r.zone.lastIndexOf("/") + 1) + "/instances/" + r.name'
+    params:
+      exclude_gke_nodes: true
+      allowed_instance_patterns: []
+    check:
+      assert: |
+        !r.?canIpForward.orValue(false)
+        || params.allowed_instance_patterns.exists(p, r.name.matches(p))
+      message: "Instance {{ .r.name }} has IP forwarding enabled (canIpForward=true)"
+    evidence:
+      - 'r.?canIpForward.orValue(false)'
+    remediation: |
+      gcloud compute instances export <INSTANCE_NAME> --zone=<ZONE> --destination=<FILE_PATH>
+      edit the file to set canIpForward: false, then
+      gcloud compute instances update-from-file <INSTANCE_NAME> --zone=<ZONE> --source=<FILE_PATH> --most-disruptive-allowed-action=REFRESH
+    references:
+      - https://cloud.google.com/vpc/docs/using-routes#canipforward
+      - https://cloud.google.com/compute/docs/instances/update-instance-properties
+    notes: |
+      Fails when canIpForward is true; the default is false, so a missing field passes. GKE nodes
+      (name prefix gke- and label goog-gke-node) are excluded per the CIS exception because GKE needs
+      IP forwarding on them. Instances that legitimately route traffic (NAT gateways, network virtual
+      appliances) can be allowed with allowed_instance_patterns (RE2 patterns on the instance name,
+      for example "^nva-") or exempted in the profile; the default empty list keeps the CIS baseline.
+
+  - id: cis-gcp-4.7
+    ref: "4.7"
+    title: Ensure VM Disks for Critical VMs Are Encrypted With Customer-Supplied Encryption Keys (CSEK)
+    profile: L2
+    cis_assessment: automated
+    mode: contextual
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: disks
+        gcloud: compute disks list --project={{ .project }} --format=json
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.disks
+      filter: |
+        (params.critical_label_key in r.?labels.orValue({})
+          && r.labels[params.critical_label_key] in params.critical_label_values)
+        || data.instances.exists(i,
+             i.?selfLink.orValue("") in r.?users.orValue([])
+             && params.critical_label_key in i.?labels.orValue({})
+             && i.labels[params.critical_label_key] in params.critical_label_values)
+      kind: compute.googleapis.com/Disk
+      name: |
+        (has(r.zone)
+          ? "zones/" + r.zone.substring(r.zone.lastIndexOf("/") + 1)
+          : "regions/" + r.region.substring(r.region.lastIndexOf("/") + 1))
+        + "/disks/" + r.name
+      empty: not_applicable
+    params:
+      critical_label_key: criticality
+      critical_label_values: [critical, high]
+    check:
+      assert: 'r.?diskEncryptionKey.?sha256.orValue("") != ""'
+      message: "Disk {{ .r.name }} of a critical VM is not encrypted with a customer-supplied encryption key (CSEK)"
+    evidence:
+      - 'r.?diskEncryptionKey.orValue({})'
+      - 'r.?labels.orValue({})'
+      - 'r.?users.orValue([])'
+    remediation: |
+      Existing disks cannot be re-encrypted; create a new disk (or instance) with a CSEK and migrate data:
+      gcloud compute disks create <DISK_NAME> --zone=<ZONE> --csek-key-file=<KEY_FILE>
+      gcloud compute instances create <INSTANCE_NAME> --zone=<ZONE> --csek-key-file=<KEY_FILE>
+    references:
+      - https://cloud.google.com/compute/docs/disks/customer-supplied-encryption#encrypt_a_new_persistent_disk_with_your_own_keys
+      - https://cloud.google.com/compute/docs/reference/rest/v1/disks/get
+    notes: |
+      "Critical VMs" is organization-defined, so the population is disks that carry label
+      critical_label_key with a value in critical_label_values, or that are attached (users[]) to an
+      instance carrying that label. Only CSEK satisfies the check (diskEncryptionKey.sha256 present);
+      CMEK disks (diskEncryptionKey.kmsKeyName) and Google-managed keys fail, as in CIS. When no disk
+      or instance carries the label the rule is NOT_APPLICABLE, which can also mean critical VMs are
+      not labeled yet; tune critical_label_key and critical_label_values to the organization's
+      labeling convention, or exclude the rule in the profile when CSEK is not required.
+
+  - id: cis-gcp-4.8
+    ref: "4.8"
+    title: Ensure Compute Instances Are Launched With Shielded VM Enabled
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: '"zones/" + r.zone.substring(r.zone.lastIndexOf("/") + 1) + "/instances/" + r.name'
+    params:
+      require_secure_boot: false
+    check:
+      assert: |
+        r.?shieldedInstanceConfig.?enableVtpm.orValue(false)
+        && r.?shieldedInstanceConfig.?enableIntegrityMonitoring.orValue(false)
+        && (!params.require_secure_boot || r.?shieldedInstanceConfig.?enableSecureBoot.orValue(false))
+      message: "Instance {{ .r.name }} does not have Shielded VM vTPM and integrity monitoring enabled (or Secure Boot, when require_secure_boot is true)"
+    evidence:
+      - 'r.?shieldedInstanceConfig.orValue({})'
+    remediation: |
+      gcloud compute instances stop <INSTANCE_NAME> --zone=<ZONE>
+      gcloud compute instances update <INSTANCE_NAME> --zone=<ZONE> --shielded-vtpm --shielded-integrity-monitoring
+      add --shielded-secure-boot when no custom or unsigned drivers are used
+      gcloud compute instances start <INSTANCE_NAME> --zone=<ZONE>
+      Prevention: enforce the org policy constraint compute.requireShieldedVm
+    references:
+      - https://cloud.google.com/compute/docs/instances/modifying-shielded-vm
+      - https://cloud.google.com/security/shielded-cloud/shielded-vm#organization-policy-constraint
+    notes: |
+      Requires shieldedInstanceConfig.enableVtpm and enableIntegrityMonitoring, as in the CIS audit;
+      instances on images without Shielded VM support have no shieldedInstanceConfig and fail (the
+      default is not enabled). Secure Boot is optional in CIS because custom or unsigned drivers stop
+      the VM from booting; set require_secure_boot=true to require it. The CIS text states no GKE
+      exception, so GKE nodes are evaluated (GKE shielded nodes enable vTPM and integrity monitoring
+      by default).
+
+  - id: cis-gcp-4.9
+    ref: "4.9"
+    title: Ensure That Compute Instances Do Not Have Public IP Addresses
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      filter: '!(params.exclude_gke_nodes && r.name.startsWith("gke-") && "goog-gke-node" in r.?labels.orValue({}))'
+      kind: compute.googleapis.com/Instance
+      name: '"zones/" + r.zone.substring(r.zone.lastIndexOf("/") + 1) + "/instances/" + r.name'
+    params:
+      exclude_gke_nodes: true
+      allowed_instance_patterns: []
+    check:
+      assert: |
+        !r.?networkInterfaces.orValue([]).exists(n,
+          size(n.?accessConfigs.orValue([])) > 0 || size(n.?ipv6AccessConfigs.orValue([])) > 0)
+        || params.allowed_instance_patterns.exists(p, r.name.matches(p))
+      message: "Instance {{ .r.name }} has an external IP address (IPv4 access config or external IPv6 access config)"
+    evidence:
+      - 'r.?networkInterfaces.orValue([]).map(n, n.?accessConfigs.orValue([]).map(a, a.?natIP.orValue("ephemeral, not assigned")))'
+      - 'r.?networkInterfaces.orValue([]).map(n, n.?ipv6AccessConfigs.orValue([]).map(a, a.?externalIpv6.orValue("")))'
+    remediation: |
+      gcloud compute instances delete-access-config <INSTANCE_NAME> --zone=<ZONE> --access-config-name=<ACCESS_CONFIG_NAME>
+      Prevention: org policy constraint compute.vmExternalIpAccess
+    references:
+      - https://cloud.google.com/load-balancing/docs/backend-service#backends_and_external_ip_addresses
+      - https://cloud.google.com/compute/docs/ip-addresses/reserve-static-external-ip-address#unassign_ip
+      - https://cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints
+    notes: |
+      Fails when any network interface has an IPv4 access config (accessConfigs[]) or an external IPv6
+      access config (ipv6AccessConfigs[]). Presence of the access config is used rather than natIP
+      because, per the CIS audit note, stopped instances with an ephemeral external IP have no natIP.
+      GKE nodes are excluded per the CIS exception (exclude_gke_nodes). Intentionally public
+      instances such as bastions can be allowed with allowed_instance_patterns (RE2 on the instance
+      name) or, preferably, exempted in the profile with a reason and expiry; the default empty list
+      keeps the CIS baseline.
+
+  - id: cis-gcp-4.10
+    ref: "4.10"
+    title: Ensure That App Engine Applications Enforce HTTPS Connections
+    profile: L2
+    cis_assessment: manual
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [appengine.googleapis.com]
+    collect:
+      - id: versions
+        gcloud: app versions list --project={{ .project }} --format=json
+        on_error: empty
+      - id: version_details
+        foreach: data.versions.filter(v, v.?version.?servingStatus.orValue("SERVING") == "SERVING")
+        as: ver
+        gcloud: app versions describe {{ .ver.id }} --service={{ .ver.service }} --project={{ .project }} --format=json
+    resource:
+      from: data.version_details
+      filter: 'r.?servingStatus.orValue("SERVING") == "SERVING"'
+      kind: appengine.googleapis.com/Version
+      name: r.name
+    check:
+      assert: |
+        size(r.?handlers.orValue([])) > 0
+          ? r.handlers.all(h, h.?securityLevel.orValue("") == "SECURE_ALWAYS")
+          : r.?env.orValue("standard") != "standard"
+      review_when: size(r.?handlers.orValue([])) == 0
+      message: "App Engine version {{ .r.name }} has URL handlers without secure: always (securityLevel SECURE_ALWAYS), or no handlers in the standard environment"
+      review_message: "App Engine version {{ .r.name }} has no URL handlers (flexible environment), so HTTPS enforcement cannot be read from its configuration; confirm the application or its load balancer redirects HTTP to HTTPS"
+    evidence:
+      - 'r.?handlers.orValue([]).map(h, h.?urlRegex.orValue("") + " => " + h.?securityLevel.orValue("UNSET"))'
+      - 'r.?env.orValue("standard")'
+      - 'r.?servingStatus.orValue("")'
+    remediation: |
+      Add secure: always (with redirect_http_response_code: 301) to every handler in app.yaml, then redeploy:
+      gcloud app deploy app.yaml --project=<PROJECT_ID>
+    references:
+      - https://cloud.google.com/appengine/docs/standard/python3/config/appref
+      - https://cloud.google.com/appengine/docs/flexible/nodejs/configuring-your-app-with-app-yaml
+    notes: |
+      CIS audits app.yaml (Manual); the deployed configuration is read instead. gcloud app versions
+      list enumerates versions of all services, and each serving version is described because only
+      the full view carries handlers. Every handler must have securityLevel SECURE_ALWAYS
+      (secure: always); a missing securityLevel means HTTP is accepted and fails. Non-default serving
+      versions are included because they stay reachable through version-specific URLs; stopped
+      versions are filtered out. A version without handlers fails in the standard environment and is
+      REVIEW in the flexible environment, where app.yaml cannot express secure: always and HTTPS
+      redirection is done by the application or a load balancer. Projects without an App Engine
+      application yield an empty list (on_error: empty) and NOT_APPLICABLE.
+
+  - id: cis-gcp-4.11
+    ref: "4.11"
+    title: Ensure That Compute Instances Have Confidential Computing Enabled
+    profile: L2
+    cis_assessment: automated
+    mode: contextual
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: '"zones/" + r.zone.substring(r.zone.lastIndexOf("/") + 1) + "/instances/" + r.name'
+    params:
+      confidential_capable_families: "/machineTypes/(n2d|c2d|c3d)-"
+    check:
+      assert: |
+        !r.?machineType.orValue("").matches(params.confidential_capable_families)
+        || r.?confidentialInstanceConfig.?enableConfidentialCompute.orValue(false)
+        || !(r.?confidentialInstanceConfig.?confidentialInstanceType.orValue("") in ["", "CONFIDENTIAL_INSTANCE_TYPE_UNSPECIFIED"])
+      review_when: |
+        !r.?machineType.orValue("").matches(params.confidential_capable_families)
+        && !r.?confidentialInstanceConfig.?enableConfidentialCompute.orValue(false)
+        && r.?confidentialInstanceConfig.?confidentialInstanceType.orValue("") in ["", "CONFIDENTIAL_INSTANCE_TYPE_UNSPECIFIED"]
+      message: "Instance {{ .r.name }} runs a Confidential VM capable machine type but Confidential Computing is not enabled"
+      review_message: "Instance {{ .r.name }} runs a machine family outside confidential_capable_families, so Confidential VM cannot be enabled without changing the machine type; confirm the workload does not need encryption in use"
+    evidence:
+      - 'r.?machineType.orValue("").substring(r.?machineType.orValue("").lastIndexOf("/") + 1)'
+      - 'r.?confidentialInstanceConfig.orValue({})'
+    remediation: |
+      Confidential Computing can only be set at creation; recreate the instance:
+      gcloud compute instances create <INSTANCE_NAME> --zone=<ZONE> --machine-type=<N2D_MACHINE_TYPE> --confidential-compute-type=SEV --maintenance-policy=TERMINATE
+    references:
+      - https://cloud.google.com/compute/confidential-vm/docs/creating-cvm-instance
+      - https://cloud.google.com/compute/confidential-vm/docs/about-cvm
+      - https://cloud.google.com/confidential-computing
+    notes: |
+      CIS checks enableConfidentialCompute on N2D instances and notes that Confidential VM is limited
+      to specific machine configurations. Instances whose machineType URL matches
+      confidential_capable_families (RE2; default N2D, C2D, C3D) must run as Confidential VMs
+      (enableConfidentialCompute true, or a confidentialInstanceType such as SEV, SEV_SNP or TDX).
+      Instances on other families cannot enable it without changing machine type, so they produce
+      REVIEW to confirm the workload does not need encryption in use; already-confidential instances
+      on other families pass. Extend the regex as supported families grow (for example Intel TDX on
+      C3) to turn those REVIEWs into PASS/FAIL, and exempt workloads that are out of scope.
+
+  - id: cis-gcp-4.12
+    ref: "4.12"
+    title: Ensure the Latest Operating System Updates Are Installed On Your Virtual Machines in All Projects
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+      - id: project_info
+        gcloud: compute project-info describe --project={{ .project }} --format=json
+      - id: inventories
+        # Read FULL inventories by VM zone; gcloud returns summary records under full with snake_case fields.
+        foreach: data.instances.map(i, i.zone.substring(i.zone.lastIndexOf("/") + 1)).distinct()
+        as: zone
+        gcloud: compute os-config inventories list --location={{ .zone }} --view=FULL --project={{ .project }} --format=json
+        on_error: empty
+    resource:
+      from: data.instances
+      filter: |
+        r.?status.orValue("") == "RUNNING"
+        && !(params.exclude_gke_nodes && r.name.startsWith("gke-") && "goog-gke-node" in r.?labels.orValue({}))
+      kind: compute.googleapis.com/Instance
+      name: '"zones/" + r.zone.substring(r.zone.lastIndexOf("/") + 1) + "/instances/" + r.name'
+    params:
+      max_available_updates: 0
+      max_inventory_age_days: 7
+      require_os_inventory: false
+      exclude_gke_nodes: true
+    check:
+      assert: |
+        (!params.require_os_inventory
+          || data.inventories.flatten()
+               .map(zone_result, zone_result.full)
+               .flatten()
+               .exists(inv,
+                 string(inv.instance_id) == string(r.id)
+                 && ctx.now - timestamp(inv.update_time) <= days(params.max_inventory_age_days)))
+        && data.inventories.flatten()
+             .map(zone_result, zone_result.full)
+             .flatten()
+             .filter(inv, string(inv.instance_id) == string(r.id))
+             .all(inv, inv.available_packages <= params.max_available_updates)
+      review_when: |
+        !data.inventories.flatten()
+          .map(zone_result, zone_result.full)
+          .flatten()
+          .exists(inv,
+            string(inv.instance_id) == string(r.id)
+            && ctx.now - timestamp(inv.update_time) <= days(params.max_inventory_age_days))
+      message: "Instance {{ .r.name }} has more than {{ .params.max_available_updates }} OS package update(s) available, or no current OS Config inventory while require_os_inventory is true"
+      review_message: "No OS Config inventory newer than {{ .params.max_inventory_age_days }} days for instance {{ .r.name }}; confirm VM Manager is set up (OS Config API, enable-osconfig metadata, running agent) or that another patch-management process keeps it updated"
+    evidence:
+      - |
+        data.inventories.flatten()
+          .map(zone_result, zone_result.full)
+          .flatten()
+          .filter(inv, string(inv.instance_id) == string(r.id))
+          .map(inv, {"os": inv.os, "updateTime": inv.update_time, "availableUpdates": inv.available_packages})
+      - 'r.?metadata.?items.orValue([]).filter(m, m.key == "enable-osconfig")'
+      - 'data.project_info.?commonInstanceMetadata.?items.orValue([]).filter(m, m.key == "enable-osconfig")'
+      - |
+        size(data.inventories.flatten()
+          .map(zone_result, zone_result.full)
+          .flatten()
+          .filter(inv, string(inv.instance_id) == string(r.id)))
+    remediation: |
+      gcloud services enable osconfig.googleapis.com --project=<PROJECT_ID>
+      gcloud compute project-info add-metadata --project=<PROJECT_ID> --metadata=enable-osconfig=TRUE
+      ensure the OS Config agent runs on each VM, then apply updates, for example:
+      gcloud compute os-config patch-jobs execute --instance-filter-all --project=<PROJECT_ID>
+    references:
+      - https://cloud.google.com/compute/docs/manage-os
+      - https://cloud.google.com/compute/docs/os-patch-management
+      - https://cloud.google.com/compute/docs/troubleshooting/vm-manager/verify-setup
+    notes: |
+      CIS describes a manual VM Manager setup audit plus in-guest commands. Automated approximation:
+      OS Config inventories are listed once per zone through
+      gcloud compute os-config inventories list --location=<ZONE> --view=FULL. Its JSON output wraps
+      results in a full list; each summary record uses instance_id, instance_name, update_time, and
+      available_packages. Records are joined to running instances by string-normalized instance_id
+      and instance id. An instance fails when available_packages exceeds max_available_updates.
+      An instance without an
+      inventory updated within max_inventory_age_days (OS Config API disabled, enable-osconfig unset,
+      agent not running, or stale data) produces REVIEW because CIS accepts other patch-management
+      solutions; set require_os_inventory=true to make that a FAIL where VM Manager is mandatory. The
+      population is instances rather than inventories so that VMs without OS Config data are reported
+      instead of silently missing. The CLI's available_packages count includes non-security updates
+      and frequent Windows definition updates; raise max_available_updates to tolerate a backlog. GKE nodes are
+      excluded by default because node OS updates come from GKE node image upgrades; set
+      exclude_gke_nodes=false to include them. The inventory step uses on_error: empty for a disabled
+      API, missing inventory endpoint, or failed precondition. With the default optional inventory
+      policy, an empty result produces REVIEW; require_os_inventory=true makes it FAIL. Permission
+      failures remain SKIPPED and other collection errors remain ERROR.

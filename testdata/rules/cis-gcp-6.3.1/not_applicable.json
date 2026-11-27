@@ -1,0 +1,22 @@
+{
+  "target": {
+    "type": "project",
+    "project_id": "example-prod"
+  },
+  "data": {},
+  "disabled_services": [
+    "sqladmin.googleapis.com"
+  ],
+  "expect": [
+    {
+      "rule_id": "cis-gcp-6.3.1",
+      "resource_key": "projects/example-prod",
+      "status": "NOT_APPLICABLE"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "sql_instances": "handwritten"
+    }
+  }
+}

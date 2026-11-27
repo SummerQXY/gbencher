@@ -1,0 +1,22 @@
+{
+  "target": {
+    "type": "project",
+    "project_id": "example-prod"
+  },
+  "data": {},
+  "disabled_services": [
+    "compute.googleapis.com"
+  ],
+  "expect": [
+    {
+      "rule_id": "cis-gcp-4.2",
+      "resource_key": "projects/example-prod",
+      "status": "NOT_APPLICABLE"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "instances": "handwritten"
+    }
+  }
+}

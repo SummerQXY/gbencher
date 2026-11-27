@@ -1,0 +1,18 @@
+dsl_version: 1
+benchmark: {id: cis-example, version: "1.0.0"}
+rules:
+  - id: cis-example-6.1
+    ref: 6.1
+    title: Ensure an unquoted ref is reported with its location
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: items
+        gcloud: compute instances list --project={{ .project }} --format=json
+    check:
+      assert: size(data.items) == 0
+    remediation: Quote the ref.
+    notes: Fixture for loader tests.

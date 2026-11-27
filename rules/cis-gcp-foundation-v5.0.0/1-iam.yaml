@@ -1,0 +1,1072 @@
+dsl_version: 1
+benchmark:
+  id: cis-gcp-foundation
+  version: "5.0.0"
+  section: "1"
+  title: Identity and Access Management
+# Workspace users, super admins and 2SV fields come from the Admin SDK Directory API; these are not gcloud IAM resources, so the Google REST API is kept.
+rules:
+  - id: cis-gcp-1.1.1
+    ref: "1.1.1"
+    title: Ensure Super Admin Email Address Is Not Tied To A Single User
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: organization
+    evaluate_per: organization
+    requires: [workspace-admin]
+    collect:
+      - id: super_admins
+        api:
+          method: GET
+          url: https://admin.googleapis.com/admin/directory/v1/users?customer=my_customer&query=isAdmin%3Dtrue&maxResults=500
+          paginate: true
+          list_field: users
+          scopes: ["https://www.googleapis.com/auth/admin.directory.user.readonly"]
+    resource:
+      from: data.super_admins
+      filter: "!r.?suspended.orValue(false) && !r.?archived.orValue(false)"
+      kind: admin.googleapis.com/User
+      name: r.primaryEmail
+    params:
+      approved_super_admins: []
+      dedicated_admin_patterns:
+        - '(?i)^((gcp|gcloud|cloud|gws|workspace|google|org|identity|iam|it)[-_.]?)?(super[-_.]?)?admin(istrator)?([-_.]?[0-9]+)?@'
+        - '(?i)^(break[-_.]?glass|emergency([-_.]?(access|admin))?)([-_.]?[0-9]+)?@'
+    check:
+      assert: |
+        size(params.approved_super_admins) == 0
+        || r.primaryEmail.lowerAscii() in params.approved_super_admins.map(e, e.lowerAscii())
+      review_when: |
+        size(params.approved_super_admins) == 0
+        && !params.dedicated_admin_patterns.exists(p, r.primaryEmail.matches(p))
+      message: "Super admin role is held by {{ .r.primaryEmail }}, which is not listed in params.approved_super_admins"
+      review_message: "Confirm that super admin {{ .r.primaryEmail }} is a dedicated account used only for super admin tasks and not an individual user's mailbox, then list it in params.approved_super_admins"
+    evidence: [r.primaryEmail, r.name.fullName, r.orgUnitPath, r.isEnrolledIn2Sv, r.lastLoginTime]
+    remediation: |
+      Google Admin console > Account > Admin roles > Super Admin: assign the role to a dedicated account
+      (e.g. gcp-superadmin@<DOMAIN>, enforced 2SV with a security key) and unassign it from individual user accounts.
+    references:
+      - https://cloud.google.com/resource-manager/docs/super-admin-best-practices
+      - https://developers.google.com/admin-sdk/directory/reference/rest/v1/users
+    notes: |
+      Lists super admins (isAdmin=true) through the Admin SDK Directory API and evaluates each active account;
+      suspended and archived accounts are ignored. Whether an address is a dedicated super admin account or an
+      individual's mailbox is an organizational fact, so the rule is contextual and replaces the manual review of
+      Account > Admin roles > Super Admin: when params.approved_super_admins lists the dedicated accounts, every
+      other super admin fails (deterministic); while it is empty, accounts matching params.dedicated_admin_patterns
+      (role-style names such as gcp-superadmin@, cloud-admin@, breakglass@) pass and all others produce REVIEW.
+      Tune approved_super_admins (preferred) or dedicated_admin_patterns. Requires --enable workspace-admin with an
+      ADC token that carries the admin.directory.user.readonly scope; the CIS benchmark lists no references, so the
+      references are Google's super admin guidance and the Directory API reference.
+
+  - id: cis-gcp-1.1.2
+    ref: "1.1.2"
+    title: Ensure Super Admin Account Is Not Used For Google Cloud Administration
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: organization
+    evaluate_per: organization
+    requires: [workspace-admin]
+    collect:
+      - id: super_admins
+        api:
+          method: GET
+          url: https://admin.googleapis.com/admin/directory/v1/users?customer=my_customer&query=isAdmin%3Dtrue&maxResults=500
+          paginate: true
+          list_field: users
+          scopes: ["https://www.googleapis.com/auth/admin.directory.user.readonly"]
+      - id: org_iam_policy
+        gcloud: organizations get-iam-policy {{ .organization }} --format=json
+        requires: [org-access]
+        on_error: skip
+    resource:
+      from: data.super_admins
+      filter: "!r.?suspended.orValue(false) && !r.?archived.orValue(false)"
+      kind: admin.googleapis.com/User
+      name: r.primaryEmail
+    check:
+      assert: |
+        !data.?org_iam_policy.?bindings.orValue([]).exists(b,
+          b.?members.orValue([]).exists(m, m.lowerAscii() == "user:" + r.primaryEmail.lowerAscii()))
+      review_when: "!has(data.org_iam_policy)"
+      message: "Super admin {{ .r.primaryEmail }} is granted IAM role(s) on the organization"
+      review_message: "The organization IAM policy was not collected (org-access unavailable); verify that super admin {{ .r.primaryEmail }} holds no IAM roles at organization, folder or project level"
+    evidence:
+      - "data.org_iam_policy.bindings.filter(b, b.?members.orValue([]).exists(m, m.lowerAscii() == 'user:' + r.primaryEmail.lowerAscii())).map(b, b.role)"
+    remediation: |
+      gcloud organizations remove-iam-policy-binding <ORGANIZATION_ID> --member=user:<SUPER_ADMIN_EMAIL> --role=<ROLE>
+      (repeat on folders and projects), and grant the needed GCP roles to a separate regular (non super admin) account.
+    references:
+      - https://cloud.google.com/resource-manager/docs/super-admin-best-practices
+      - https://cloud.google.com/sdk/gcloud/reference/organizations/get-iam-policy
+    notes: |
+      Lists super admins through the Admin SDK Directory API and compares each active super admin's primary email
+      with the direct user: members of the organization IAM policy; any organization-level role fails. This replaces
+      the manual cross-check between Admin roles > Super Admin and IAM & Admin > IAM at the organization level.
+      Contextual because the coverage is partial: folder- and project-level bindings, grants received through
+      group: or domain: members, and actual use of super admin accounts for GCP administration are not evaluated.
+      Detecting use would require Admin and Cloud Audit activity-log analysis, which the scanner does not do;
+      Cloud Asset Inventory searchAllIamPolicies can extend the binding check to the whole hierarchy. The
+      organization IAM policy step needs org-access; without it every super admin produces REVIEW. Nothing to tune
+      beyond enabling org-access; use profile exemptions for accepted break-glass accounts.
+
+  - id: cis-gcp-1.1.3
+    ref: "1.1.3"
+    title: Ensure Folders Are Structured By Environment And Sensitivity
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: organization
+    evaluate_per: organization
+    requires: [org-access]
+    collect:
+      - id: top_folders
+        gcloud: resource-manager folders list --organization={{ .organization }} --format=json
+      - id: subfolders
+        foreach: data.top_folders.map(f, f.name.replace("folders/", ""))
+        as: folder_id
+        gcloud: resource-manager folders list --folder={{ .folder_id }} --format=json
+      - id: org_projects
+        gcloud: 'projects list --filter="parent.type=organization AND parent.id={{ .organization }}" --format=json'
+    params:
+      folder_name_patterns:
+        - '(?i)(^|[^a-z])(prod|production|prd|non-?prod|nonprod|nonproduction|pre-?prod|staging|stage|stg|uat|qa|test|testing|dev|development|sandbox|sbx|lab|experiments?)([^a-z]|$)'
+        - '(?i)(^|[^a-z])(security|sec|logging|logs|audit|monitoring|shared|common|core|infra|infrastructure|network|networking|platform|management|mgmt|bootstrap|seed|billing|regulated|pci|hipaa|restricted|confidential|sensitive)([^a-z]|$)'
+      allow_projects_under_org: false
+      allowed_org_level_projects: []
+    check:
+      assert: |
+        size(data.top_folders) > 0
+        && (params.allow_projects_under_org
+            || data.org_projects.all(p,
+                 p.?lifecycleState.orValue("ACTIVE") != "ACTIVE"
+                 || p.projectId in params.allowed_org_level_projects))
+      review_when: |
+        data.top_folders.exists(f,
+          !params.folder_name_patterns.exists(p, f.?displayName.orValue("").matches(p)))
+      message: "The organization has no folder hierarchy, or active projects sit directly under the organization node"
+      review_message: "Some top-level folders are not named by environment or sensitivity; confirm they are not organized by department or owner, or extend params.folder_name_patterns"
+    evidence:
+      - data.top_folders.map(f, f.displayName)
+      - data.subfolders.flatten().map(f, f.displayName)
+      - "data.org_projects.filter(p, p.?lifecycleState.orValue('ACTIVE') == 'ACTIVE' && !(p.projectId in params.allowed_org_level_projects)).map(p, p.projectId)"
+      - "data.top_folders.filter(f, !params.folder_name_patterns.exists(p, f.?displayName.orValue('').matches(p))).map(f, f.displayName)"
+    remediation: |
+      gcloud resource-manager folders create --display-name=<ENVIRONMENT_OR_SENSITIVITY> --organization=<ORGANIZATION_ID>
+      gcloud projects move <PROJECT_ID> --folder=<FOLDER_ID>
+    references:
+      - https://cloud.google.com/resource-manager/docs/creating-managing-folders
+      - https://cloud.google.com/architecture/landing-zones/decide-resource-hierarchy
+    notes: |
+      Enumerates top-level folders, one level of sub-folders and the projects whose parent is the organization node.
+      Sub-folders are listed by numeric folder ID because gcloud builds folders/<ID> from --folder itself. The rule
+      fails when the organization has no folders or has active projects directly under it, as the CIS remediation
+      requires, unless allow_projects_under_org is true or the project is listed in allowed_org_level_projects.
+      Whether folders follow environment and sensitivity rather than the org chart is a human judgement: top-level
+      folders whose displayName matches none of folder_name_patterns produce REVIEW. Tune folder_name_patterns to the
+      organization's naming convention. Sub-folder names are reported as evidence; sampling projects to confirm their
+      workloads fit the folder purpose (CIS audit step 6) is not automated. The CIS benchmark lists no references.
+
+  - id: cis-gcp-1.1.4
+    ref: "1.1.4"
+    title: Ensure Organization Policies Are Configured For Centralized Constraints
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: project
+    services: [orgpolicy.googleapis.com]
+    collect:
+      - id: effective_policies
+        foreach: params.required_constraints
+        as: constraint
+        gcloud: org-policies describe {{ .constraint }} --project={{ .project }} --effective --format=json
+        on_error: empty
+    params:
+      required_constraints:
+        - constraints/gcp.resourceLocations
+        - constraints/compute.requireOsLogin
+        - constraints/compute.vmExternalIpAccess
+        - constraints/storage.uniformBucketLevelAccess
+        - constraints/iam.allowedPolicyMemberDomains
+    check:
+      assert: |
+        size(data.effective_policies) == size(params.required_constraints)
+        && data.effective_policies.all(p,
+             type(p) == map
+             && p.?spec.?rules.orValue([]).exists(rule,
+                  rule.?enforce.orValue(false)
+                  || rule.?denyAll.orValue(false)
+                  || size(rule.?values.?allowedValues.orValue([])) > 0
+                  || size(rule.?values.?deniedValues.orValue([])) > 0))
+      message: "One or more baseline organization policy constraints are not enforced on this project (see evidence)"
+    evidence:
+      - |
+        params.required_constraints.filter(c, !data.effective_policies.exists(p,
+          type(p) == map
+          && p.?name.orValue("").endsWith("/policies/" + c.replace("constraints/", ""))
+          && p.?spec.?rules.orValue([]).exists(rule,
+               rule.?enforce.orValue(false)
+               || rule.?denyAll.orValue(false)
+               || size(rule.?values.?allowedValues.orValue([])) > 0
+               || size(rule.?values.?deniedValues.orValue([])) > 0)))
+      - data.effective_policies
+    remediation: |
+      gcloud org-policies set-policy <POLICY_FILE>.yaml   (set at organization or folder level; test with a dryRunSpec first)
+      e.g. gcloud resource-manager org-policies enable-enforce compute.requireOsLogin --organization=<ORGANIZATION_ID>
+    references:
+      - https://cloud.google.com/resource-manager/docs/organization-policy/overview
+      - https://cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints
+    notes: |
+      Reads the effective policy on the scanned project for each constraint in required_constraints, so organization
+      and folder policies, inheritance and project-level overrides are all reflected (this covers CIS audit steps 1
+      and 2 for the scanned project). A constraint counts as configured when a rule enforces it (enforce: true) or
+      restricts values (allowedValues, deniedValues or denyAll); unset, enforce: false and allowAll do not count.
+      Dry-run specs do not enforce and are ignored. A describe error (for example an unknown constraint) becomes an
+      empty result and counts as not configured. Contextual because the baseline is organization specific: the
+      defaults are the five constraints the CIS audit gives as common examples; replace required_constraints with
+      the organization's documented baseline. Evidence lists the constraints that are not configured. The CIS
+      benchmark lists no references.
+
+  - id: cis-gcp-1.2
+    ref: "1.2"
+    title: Ensure that Corporate Login Credentials are Used
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: project
+    requires: [workspace-admin]
+    collect:
+      - id: iam_policy
+        gcloud: projects get-iam-policy {{ .project }} --format=json
+      - id: domain_restriction
+        gcloud: org-policies describe constraints/iam.allowedPolicyMemberDomains --project={{ .project }} --effective --format=json
+        on_error: empty
+      - id: directory_users
+        requires: [workspace-admin]
+        on_error: empty
+        api:
+          method: GET
+          url: https://admin.googleapis.com/admin/directory/v1/users?customer=my_customer&maxResults=500
+          paginate: true
+          list_field: users
+          scopes: ["https://www.googleapis.com/auth/admin.directory.user.readonly"]
+    resource:
+      from: data.iam_policy.?bindings.orValue([])
+      filter: r.?members.orValue([]).exists(m, m.startsWith("user:"))
+      kind: iam.googleapis.com/Binding
+      name: 'has(r.condition) ? r.role + " (condition: " + r.condition.?title.orValue("untitled") + ")" : r.role'
+      empty: pass
+    params:
+      allowed_domains: []
+      allowed_members: []
+    check:
+      assert: |
+        (size(params.allowed_domains) == 0 && ctx.organization_domain == "")
+        || r.?members.orValue([]).all(m,
+             !m.startsWith("user:")
+             || m.lowerAscii() in params.allowed_members.map(x, x.lowerAscii())
+             || (size(params.allowed_domains) > 0 ? params.allowed_domains : [ctx.organization_domain])
+                  .exists(d, m.lowerAscii().endsWith("@" + d.lowerAscii()))
+             || data.?directory_users.orValue([]).exists(u,
+                  "user:" + u.?primaryEmail.orValue("").lowerAscii() == m.lowerAscii()))
+      review_when: size(params.allowed_domains) == 0 && ctx.organization_domain == ""
+      message: "Role {{ .r.role }} is granted to user account(s) outside the corporate domain(s)"
+      review_message: "No corporate domain is known (no organization and params.allowed_domains is empty); confirm that the user accounts holding {{ .r.role }} are corporate accounts, or set params.allowed_domains"
+    evidence:
+      - |
+        r.?members.orValue([]).filter(m,
+          m.startsWith("user:")
+          && !(m.lowerAscii() in params.allowed_members.map(x, x.lowerAscii()))
+          && !(size(params.allowed_domains) > 0 ? params.allowed_domains : [ctx.organization_domain])
+                .exists(d, m.lowerAscii().endsWith("@" + d.lowerAscii()))
+          && !data.?directory_users.orValue([]).exists(u,
+                "user:" + u.?primaryEmail.orValue("").lowerAscii() == m.lowerAscii()))
+      - data.domain_restriction
+    remediation: |
+      gcloud projects remove-iam-policy-binding <PROJECT_ID> --member=user:<CONSUMER_EMAIL> --role=<ROLE>
+      Prevent new grants with Domain Restricted Sharing (constraints/iam.allowedPolicyMemberDomains).
+    references:
+      - https://cloud.google.com/sdk/gcloud/reference/projects/get-iam-policy
+      - https://cloud.google.com/resource-manager/docs/organization-policy/restricting-domains
+      - https://support.google.com/work/android/answer/6371476
+    notes: |
+      Evaluates every project IAM binding that has user: members. A user member counts as corporate when its email
+      domain is in allowed_domains (when empty, the organization domain ctx.organization_domain, i.e. the
+      organization display name), when it is listed in allowed_members (full member strings such as
+      user:partner@example.org), or, with --enable workspace-admin, when it exists in the Workspace/Cloud Identity
+      directory, which also recognizes secondary domains. Service accounts, groups and domain: members are not login
+      credentials and are out of scope. Contextual because the corporate domain set is organization specific:
+      projects without an organization and without allowed_domains produce REVIEW; set allowed_domains to every
+      verified primary, secondary and alias domain to make the verdict deterministic. The effective
+      iam.allowedPolicyMemberDomains policy is supporting evidence only, since Domain Restricted Sharing blocks new
+      external grants but does not remove existing ones. Folder and organization IAM policies from the CIS audit
+      are not evaluated by this project-scoped rule.
+
+  - id: cis-gcp-1.3
+    ref: "1.3"
+    title: "Ensure that Multi-Factor Authentication is 'Enabled' for All Non-Service Accounts"
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: organization
+    evaluate_per: organization
+    requires: [workspace-admin]
+    collect:
+      - id: users
+        api:
+          method: GET
+          url: https://admin.googleapis.com/admin/directory/v1/users?customer=my_customer&maxResults=500
+          paginate: true
+          list_field: users
+          scopes: ["https://www.googleapis.com/auth/admin.directory.user.readonly"]
+    resource:
+      from: data.users
+      filter: "!r.?suspended.orValue(false) && !r.?archived.orValue(false)"
+      kind: admin.googleapis.com/User
+      name: r.primaryEmail
+    params:
+      sso_mfa_org_units: []
+      require_enforcement: false
+    check:
+      assert: |
+        params.sso_mfa_org_units.exists(ou,
+          ou == "/" || r.?orgUnitPath.orValue("") == ou || r.?orgUnitPath.orValue("").startsWith(ou + "/"))
+        || (r.?isEnrolledIn2Sv.orValue(false)
+            && (!params.require_enforcement || r.?isEnforcedIn2Sv.orValue(false)))
+      message: "User {{ .r.primaryEmail }} is not enrolled in 2-Step Verification (or 2SV is not enforced while params.require_enforcement is true)"
+    evidence: [r.isEnrolledIn2Sv, r.isEnforcedIn2Sv, r.orgUnitPath, r.lastLoginTime]
+    remediation: |
+      Google Admin console > Security > Authentication > 2-Step Verification: allow and enforce 2SV for all
+      organizational units, and have every user enroll a second factor.
+    references:
+      - https://cloud.google.com/solutions/securing-gcp-account-u2f
+      - https://support.google.com/accounts/answer/185839
+    notes: |
+      Lists every Workspace/Cloud Identity user through the Admin SDK Directory API and fails active users that are
+      not enrolled in 2-Step Verification (isEnrolledIn2Sv); suspended and archived users are ignored. Directory
+      users are by definition non-service accounts. This replaces the manual per-account MFA verification and is
+      stricter than the CIS audit because it covers the whole directory, not only principals bound in IAM policies.
+      Contextual because MFA enforced by an external SAML/OIDC identity provider is invisible to the Directory API:
+      list the org unit paths whose users sign in through such an IdP in sso_mfa_org_units ("/" covers everyone).
+      Set require_enforcement=true to also require isEnforcedIn2Sv. Consumer accounts outside the directory are
+      covered by 1.2. Requires --enable workspace-admin with the admin.directory.user.readonly scope.
+
+  - id: cis-gcp-1.4
+    ref: "1.4"
+    title: Ensure that Security Key Enforcement is Enabled for All Admin Accounts
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: organization
+    evaluate_per: organization
+    requires: [workspace-admin]
+    collect:
+      - id: users
+        api:
+          method: GET
+          url: https://admin.googleapis.com/admin/directory/v1/users?customer=my_customer&maxResults=500
+          paginate: true
+          list_field: users
+          scopes: ["https://www.googleapis.com/auth/admin.directory.user.readonly"]
+      - id: org_iam_policy
+        gcloud: organizations get-iam-policy {{ .organization }} --format=json
+        requires: [org-access]
+        on_error: skip
+    resource:
+      from: data.users
+      filter: |
+        !r.?suspended.orValue(false) && !r.?archived.orValue(false)
+        && (r.?isAdmin.orValue(false) || r.?isDelegatedAdmin.orValue(false)
+            || data.?org_iam_policy.?bindings.orValue([]).exists(b,
+                 b.role in params.admin_roles
+                 && b.?members.orValue([]).exists(m, m.lowerAscii() == "user:" + r.primaryEmail.lowerAscii())))
+      kind: admin.googleapis.com/User
+      name: r.primaryEmail
+    params:
+      admin_roles: [roles/resourcemanager.organizationAdmin]
+      security_key_org_units: []
+    check:
+      assert: r.?isEnrolledIn2Sv.orValue(false) && r.?isEnforcedIn2Sv.orValue(false)
+      review_when: |
+        !params.security_key_org_units.exists(ou,
+          ou == "/" || r.?orgUnitPath.orValue("") == ou || r.?orgUnitPath.orValue("").startsWith(ou + "/"))
+      message: "Admin account {{ .r.primaryEmail }} does not have 2-Step Verification both enrolled and enforced"
+      review_message: "2-Step Verification is enforced for admin {{ .r.primaryEmail }}, but the Directory API does not expose the allowed 2SV methods; confirm that 'Only security key' is enforced for org unit {{ .r.orgUnitPath }} and add it to params.security_key_org_units"
+    evidence: [r.isAdmin, r.isDelegatedAdmin, r.isEnrolledIn2Sv, r.isEnforcedIn2Sv, r.orgUnitPath]
+    remediation: |
+      Google Admin console > Security > Authentication > 2-Step Verification: for the org unit or group holding admin
+      accounts, turn enforcement on and set Methods to "Only security key" (register backup keys first).
+    references:
+      - https://cloud.google.com/security-key/
+    notes: |
+      Admin accounts are active directory users that are super admins (isAdmin), delegated admins
+      (isDelegatedAdmin), or direct user: members of admin_roles on the organization IAM policy (default
+      roles/resourcemanager.organizationAdmin, the role named in the CIS audit). An admin without 2SV both enrolled
+      and enforced fails, since enforcement is a precondition of security key enforcement. The Directory API does not
+      expose the allowed 2SV methods, so the security-key-only part of the CIS check cannot be observed: enforced
+      admins produce REVIEW unless their org unit is listed in security_key_org_units, where the organization has
+      confirmed that 2SV methods are set to "Only security key". Tune security_key_org_units ("/" covers everyone)
+      and admin_roles. Organization admins whose accounts are not in the directory are not covered (see 1.2). The
+      organization IAM policy step needs org-access; without it only Workspace admins are evaluated.
+
+  - id: cis-gcp-1.5
+    ref: "1.5"
+    title: Ensure That There Are Only GCP-Managed Service Account Keys for Each Service Account
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [iam.googleapis.com]
+    collect:
+      - id: service_accounts
+        gcloud: iam service-accounts list --project={{ .project }} --format=json
+      - id: user_keys
+        foreach: data.service_accounts
+        as: sa
+        attach: user_keys
+        gcloud: iam service-accounts keys list --iam-account={{ .sa.email }} --managed-by=user --format=json
+    resource:
+      from: data.service_accounts
+      kind: iam.googleapis.com/ServiceAccount
+      name: r.email
+    check:
+      assert: size(r.?user_keys.orValue([])) == 0
+      message: "Service account {{ .r.email }} has user-managed key(s)"
+    evidence: ["r.user_keys.map(k, k.name)"]
+    remediation: gcloud iam service-accounts keys delete <KEY_ID> --iam-account=<SA_EMAIL>
+    references:
+      - https://cloud.google.com/iam/docs/best-practices-for-managing-service-account-keys
+    notes: |
+      Google-managed keys are excluded by --managed-by=user. Default service accounts
+      (compute, App Engine) are included because they can also carry user-managed keys.
+
+  - id: cis-gcp-1.6
+    ref: "1.6"
+    title: Ensure That Service Account Has No Admin Privileges
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    collect:
+      - id: iam_policy
+        gcloud: projects get-iam-policy {{ .project }} --format=json
+    resource:
+      from: data.iam_policy.?bindings.orValue([])
+      filter: r.role in params.admin_roles || r.role.matches(params.admin_role_pattern)
+      kind: iam.googleapis.com/Binding
+      name: 'has(r.condition) ? r.role + " (condition: " + r.condition.?title.orValue("untitled") + ")" : r.role'
+      empty: pass
+    params:
+      admin_roles: [roles/owner, roles/editor]
+      admin_role_pattern: "(?i)admin"
+      google_managed_patterns:
+        - '^serviceAccount:service-[0-9]+@'
+        - '@gcp-sa-[a-z0-9-]+\.iam\.gserviceaccount\.com$'
+        - '@containerregistry\.iam\.gserviceaccount\.com$'
+        - '@cloudservices\.gserviceaccount\.com$'
+        - '@cloudbuild\.gserviceaccount\.com$'
+    check:
+      assert: |
+        !r.?members.orValue([]).exists(m,
+          m.startsWith("serviceAccount:")
+          && m.endsWith(".iam.gserviceaccount.com")
+          && !params.google_managed_patterns.exists(p, m.matches(p)))
+      message: "Admin role {{ .r.role }} is granted to user-managed service account(s)"
+    evidence:
+      - |
+        r.?members.orValue([]).filter(m,
+          m.startsWith("serviceAccount:")
+          && m.endsWith(".iam.gserviceaccount.com")
+          && !params.google_managed_patterns.exists(p, m.matches(p)))
+    remediation: |
+      gcloud projects remove-iam-policy-binding <PROJECT_ID> --member=serviceAccount:<SA_EMAIL> --role=<ADMIN_ROLE>
+      (or edit the policy from gcloud projects get-iam-policy and apply it with gcloud projects set-iam-policy <PROJECT_ID> iam.json),
+      then grant the service account only the specific roles it needs.
+    references:
+      - https://cloud.google.com/iam/docs/understanding-roles
+      - https://cloud.google.com/iam/docs/understanding-service-accounts
+      - https://cloud.google.com/iam/docs/best-practices-service-accounts
+    notes: |
+      Evaluates every project IAM binding whose role is an admin role: admin_roles (roles/owner, roles/editor) or
+      any role matching admin_role_pattern ((?i)admin covers *Admin and *admin, including custom roles). A binding
+      fails when it includes a user-managed service account, i.e. a serviceAccount: member ending in
+      .iam.gserviceaccount.com that matches none of google_managed_patterns (Google service agents such as
+      service-<number>@..., @gcp-sa-*, @containerregistry...). Default service accounts
+      (<number>-compute@developer.gserviceaccount.com, <project>@appspot.gserviceaccount.com) are excluded as in CIS
+      because they are user-managed but not user-created. Service accounts from other projects are included.
+      Conditional bindings are evaluated like unconditional ones; bindings inherited from folders or the
+      organization are not evaluated.
+
+  - id: cis-gcp-1.7
+    ref: "1.7"
+    title: Ensure That IAM Users Are Not Assigned the Service Account User or Service Account Token Creator Roles at Project Level
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    collect:
+      - id: iam_policy
+        gcloud: projects get-iam-policy {{ .project }} --format=json
+    resource:
+      from: data.iam_policy.?bindings.orValue([])
+      filter: r.role in params.roles
+      kind: iam.googleapis.com/Binding
+      name: 'has(r.condition) ? r.role + " (condition: " + r.condition.?title.orValue("untitled") + ")" : r.role'
+      empty: pass
+    params:
+      roles: [roles/iam.serviceAccountUser, roles/iam.serviceAccountTokenCreator]
+      member_prefixes: ["user:", "group:", "domain:"]
+    check:
+      assert: "!r.?members.orValue([]).exists(m, params.member_prefixes.exists(p, m.startsWith(p)))"
+      message: "{{ .r.role }} is granted at project level to user, group or domain principal(s)"
+    evidence:
+      - r.?members.orValue([]).filter(m, params.member_prefixes.exists(p, m.startsWith(p)))
+    remediation: |
+      gcloud projects remove-iam-policy-binding <PROJECT_ID> --member=user:<EMAIL> --role=roles/iam.serviceAccountUser
+      gcloud projects remove-iam-policy-binding <PROJECT_ID> --member=user:<EMAIL> --role=roles/iam.serviceAccountTokenCreator
+      then grant the role on the specific service account:
+      gcloud iam service-accounts add-iam-policy-binding <SA_EMAIL> --member=user:<EMAIL> --role=roles/iam.serviceAccountUser
+    references:
+      - https://cloud.google.com/iam/docs/service-accounts
+      - https://cloud.google.com/iam/docs/granting-roles-to-service-accounts
+      - https://cloud.google.com/iam/docs/understanding-roles
+    notes: |
+      Evaluates project-level bindings of roles/iam.serviceAccountUser and roles/iam.serviceAccountTokenCreator and
+      fails when they include principals whose type is listed in member_prefixes. The defaults cover user:, group:
+      and domain:, because a group or domain grant gives people the same project-wide impersonation as a direct user
+      grant. Service accounts are excluded so that Google service agents which legitimately hold Token Creator at
+      project level do not fail; the CIS CLI audit flags any member, and adding "serviceAccount:" to member_prefixes
+      reproduces that strict reading. Conditional bindings still fail; if a condition limits the grant to specific
+      service accounts, use a profile exemption. Grants on individual service accounts are the compliant pattern and
+      are not inspected.
+
+  - id: cis-gcp-1.8
+    ref: "1.8"
+    title: Ensure User-Managed/External Keys for Service Accounts Are Rotated Every 90 Days or Fewer
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [iam.googleapis.com]
+    collect:
+      - id: service_accounts
+        gcloud: iam service-accounts list --project={{ .project }} --format=json
+      - id: user_keys
+        foreach: data.service_accounts
+        as: sa
+        attach: user_keys
+        gcloud: iam service-accounts keys list --iam-account={{ .sa.email }} --managed-by=user --format=json
+    resource:
+      from: data.service_accounts
+      filter: size(r.?user_keys.orValue([])) > 0
+      kind: iam.googleapis.com/ServiceAccount
+      name: r.email
+    params:
+      max_age_days: 90
+    check:
+      assert: |
+        r.user_keys.all(k,
+          k.?disabled.orValue(false)
+          || (has(k.validBeforeTime) && timestamp(k.validBeforeTime) < ctx.now)
+          || ctx.now - timestamp(k.validAfterTime) <= days(params.max_age_days))
+      message: "Service account {{ .r.email }} has enabled user-managed key(s) older than {{ .params.max_age_days }} days"
+    evidence:
+      - |
+        r.user_keys.filter(k,
+          !k.?disabled.orValue(false)
+          && !(has(k.validBeforeTime) && timestamp(k.validBeforeTime) < ctx.now)
+          && ctx.now - timestamp(k.validAfterTime) > days(params.max_age_days))
+          .map(k, k.name + " (validAfterTime " + k.validAfterTime + ")")
+    remediation: |
+      gcloud iam service-accounts keys create <NEW_KEY_FILE> --iam-account=<SA_EMAIL>
+      (deploy the new key) then gcloud iam service-accounts keys delete <OLD_KEY_ID> --iam-account=<SA_EMAIL>
+    references:
+      - https://cloud.google.com/iam/docs/understanding-service-accounts#managing_service_account_keys
+      - https://cloud.google.com/sdk/gcloud/reference/iam/service-accounts/keys/list
+      - https://cloud.google.com/iam/docs/service-accounts
+    notes: |
+      Reuses the 1.5 collection (user-managed keys per service account, deduplicated by the engine) and evaluates
+      each service account that has user-managed keys. A key fails when it is enabled, not yet expired
+      (validBeforeTime in the future) and its validAfterTime, which is its creation time, is older than
+      max_age_days, matching the CIS audit. Google-managed keys are excluded by --managed-by=user because Google
+      rotates them. Projects without user-managed keys are NOT_APPLICABLE; 1.5 already reports their absence as
+      compliant.
+
+  - id: cis-gcp-1.9
+    ref: "1.9"
+    title: Ensure That Separation of Duties Is Enforced While Assigning Service Account Related Roles to Users
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: iam_policy
+        gcloud: projects get-iam-policy {{ .project }} --format=json
+    params:
+      member_prefixes: ["user:", "group:", "domain:"]
+    check:
+      assert: |
+        !data.iam_policy.?bindings.orValue([]).exists(a,
+          a.role == "roles/iam.serviceAccountAdmin"
+          && a.?members.orValue([]).exists(m,
+               params.member_prefixes.exists(p, m.startsWith(p))
+               && data.iam_policy.?bindings.orValue([]).exists(b,
+                    b.role == "roles/iam.serviceAccountUser" && m in b.?members.orValue([]))))
+      message: "One or more principals hold both roles/iam.serviceAccountAdmin and roles/iam.serviceAccountUser on the project (see evidence)"
+    evidence:
+      - |
+        data.iam_policy.?bindings.orValue([])
+          .filter(a, a.role == "roles/iam.serviceAccountAdmin")
+          .map(a, a.?members.orValue([]).filter(m,
+               params.member_prefixes.exists(p, m.startsWith(p))
+               && data.iam_policy.?bindings.orValue([]).exists(b,
+                    b.role == "roles/iam.serviceAccountUser" && m in b.?members.orValue([]))))
+          .flatten()
+    remediation: |
+      gcloud projects remove-iam-policy-binding <PROJECT_ID> --member=<MEMBER> --role=roles/iam.serviceAccountAdmin
+      (or --role=roles/iam.serviceAccountUser, according to business needs) and assign the removed role to another principal.
+    references:
+      - https://cloud.google.com/iam/docs/service-accounts
+      - https://cloud.google.com/iam/docs/understanding-roles
+      - https://cloud.google.com/iam/docs/granting-roles-to-service-accounts
+    notes: |
+      Aggregate check over the project IAM policy, mirroring the CIS jq audit: fails when any principal whose type
+      is listed in member_prefixes appears in both a roles/iam.serviceAccountAdmin and a roles/iam.serviceAccountUser
+      binding (conditional or not). The defaults cover user:, group: and domain: principals; add "serviceAccount:"
+      to include automation identities as the literal jq audit does. Membership through groups (a user granted one
+      role directly and the other through a group) is not expanded. Owner and Editor, which imply both roles, are
+      covered by other recommendations. Evidence lists the conflicting principals.
+
+  - id: cis-gcp-1.10
+    ref: "1.10"
+    title: Ensure That Cloud KMS Cryptokeys Are Not Anonymously or Publicly Accessible
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: critical
+    scope: project
+    services: [cloudkms.googleapis.com]
+    collect:
+      - id: locations
+        gcloud: kms locations list --project={{ .project }} --format=json
+      - id: keyrings
+        foreach: data.locations
+        as: loc
+        gcloud: kms keyrings list --location={{ .loc.locationId }} --project={{ .project }} --format=json
+      - id: keys
+        foreach: data.keyrings.flatten()
+        as: kr
+        gcloud: kms keys list --keyring={{ .kr.name }} --project={{ .project }} --format=json
+      - id: key_policies
+        foreach: data.keys.flatten()
+        as: key
+        attach: iam_policy
+        gcloud: kms keys get-iam-policy {{ .key.name }} --project={{ .project }} --format=json
+    resource:
+      from: data.keys.flatten()
+      kind: cloudkms.googleapis.com/CryptoKey
+      name: r.name
+    params:
+      public_members: [allUsers, allAuthenticatedUsers]
+    check:
+      assert: |
+        !r.?iam_policy.?bindings.orValue([]).exists(b,
+          b.?members.orValue([]).exists(m, m in params.public_members))
+      message: "Cloud KMS key {{ .r.name }} grants access to allUsers or allAuthenticatedUsers"
+    evidence:
+      - |
+        r.?iam_policy.?bindings.orValue([])
+          .filter(b, b.?members.orValue([]).exists(m, m in params.public_members))
+          .map(b, b.role)
+    remediation: |
+      gcloud kms keys remove-iam-policy-binding <KEY> --keyring=<KEY_RING> --location=<LOCATION> --member=allUsers --role=<ROLE>
+      gcloud kms keys remove-iam-policy-binding <KEY> --keyring=<KEY_RING> --location=<LOCATION> --member=allAuthenticatedUsers --role=<ROLE>
+    references:
+      - https://cloud.google.com/sdk/gcloud/reference/kms/keys/remove-iam-policy-binding
+      - https://cloud.google.com/sdk/gcloud/reference/kms/keys/get-iam-policy
+      - https://cloud.google.com/kms/docs/object-hierarchy#key_resource_id
+    notes: |
+      Enumerates every Cloud KMS key in every KMS location (locations, then key rings per location, then keys per
+      key ring, passing full resource names) instead of only location global as in the CIS example, and reads each
+      key's IAM policy. A key fails when any binding includes allUsers or allAuthenticatedUsers. Key ring IAM
+      policies, which keys inherit, are not read; the CIS audit covers key policies only. Projects without KMS keys
+      are NOT_APPLICABLE.
+
+  - id: cis-gcp-1.11
+    ref: "1.11"
+    title: Ensure KMS Encryption Keys Are Rotated Within a Period of 90 Days
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [cloudkms.googleapis.com]
+    collect:
+      - id: locations
+        gcloud: kms locations list --project={{ .project }} --format=json
+      - id: keyrings
+        foreach: data.locations
+        as: loc
+        gcloud: kms keyrings list --location={{ .loc.locationId }} --project={{ .project }} --format=json
+      - id: keys
+        foreach: data.keyrings.flatten()
+        as: kr
+        gcloud: kms keys list --keyring={{ .kr.name }} --project={{ .project }} --format=json
+    resource:
+      from: data.keys.flatten()
+      filter: r.?purpose.orValue("") == "ENCRYPT_DECRYPT" && r.?primary.?state.orValue("") == "ENABLED"
+      kind: cloudkms.googleapis.com/CryptoKey
+      name: r.name
+    params:
+      max_rotation_days: 90
+    check:
+      assert: |
+        has(r.rotationPeriod) && has(r.nextRotationTime)
+        && duration(r.rotationPeriod) <= days(params.max_rotation_days)
+        && timestamp(r.nextRotationTime) - ctx.now <= days(params.max_rotation_days)
+      message: "Cloud KMS key {{ .r.name }} has no rotation schedule or rotates less often than every {{ .params.max_rotation_days }} days"
+    evidence: [r.rotationPeriod, r.nextRotationTime, r.primary.createTime]
+    remediation: |
+      gcloud kms keys update <KEY> --keyring=<KEY_RING> --location=<LOCATION> --rotation-period=90d --next-rotation-time=<RFC3339_TIME>
+    references:
+      - https://cloud.google.com/kms/docs/key-rotation#frequency_of_key_rotation
+      - https://cloud.google.com/kms/docs/re-encrypt-data
+    notes: |
+      Enumerates every Cloud KMS key in every location and evaluates symmetric ENCRYPT_DECRYPT keys with an enabled
+      primary version; automatic rotation applies only to them, so asymmetric and MAC keys are out of scope. A key
+      fails when rotationPeriod or nextRotationTime is missing, rotationPeriod (a protobuf duration such as
+      7776000s) exceeds max_rotation_days, or nextRotationTime is more than max_rotation_days in the future, which
+      are the CIS criteria. The CIS "default 90 days" applies only to keys created in the console; keys created
+      through the API or gcloud have no schedule unless one is set, hence the explicit-presence requirement.
+
+  - id: cis-gcp-1.12
+    ref: "1.12"
+    title: Ensure That Separation of Duties Is Enforced While Assigning KMS Related Roles to Users
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: iam_policy
+        gcloud: projects get-iam-policy {{ .project }} --format=json
+    params:
+      member_prefixes: ["user:", "group:", "domain:"]
+      crypto_role_pattern: '^roles/cloudkms\.cryptoKey'
+    check:
+      assert: |
+        !data.iam_policy.?bindings.orValue([]).exists(a,
+          a.role == "roles/cloudkms.admin"
+          && a.?members.orValue([]).exists(m,
+               params.member_prefixes.exists(p, m.startsWith(p))
+               && data.iam_policy.?bindings.orValue([]).exists(b,
+                    b.role.matches(params.crypto_role_pattern) && m in b.?members.orValue([]))))
+      message: "One or more principals hold roles/cloudkms.admin together with a Cloud KMS CryptoKey encrypt/decrypt role on the project (see evidence)"
+    evidence:
+      - |
+        data.iam_policy.?bindings.orValue([])
+          .filter(a, a.role == "roles/cloudkms.admin")
+          .map(a, a.?members.orValue([]).filter(m,
+               params.member_prefixes.exists(p, m.startsWith(p))
+               && data.iam_policy.?bindings.orValue([]).exists(b,
+                    b.role.matches(params.crypto_role_pattern) && m in b.?members.orValue([]))))
+          .flatten()
+    remediation: |
+      gcloud projects remove-iam-policy-binding <PROJECT_ID> --member=<MEMBER> --role=roles/cloudkms.admin
+      (or the roles/cloudkms.cryptoKey* role, according to business needs) and assign the removed role to another principal.
+    references:
+      - https://cloud.google.com/kms/docs/separation-of-duties
+    notes: |
+      Aggregate check over the project IAM policy: fails when a principal whose type is listed in member_prefixes
+      holds roles/cloudkms.admin and any role matching crypto_role_pattern (CryptoKey Encrypter, Decrypter,
+      Encrypter/Decrypter and their delegation variants). The defaults cover user:, group: and domain: principals;
+      add "serviceAccount:" to include automation identities. Key- and key ring-level IAM bindings and group
+      expansion are not evaluated. Owner and Editor equivalence is covered by other recommendations. Evidence lists
+      the conflicting principals.
+
+  - id: cis-gcp-1.13
+    ref: "1.13"
+    title: Ensure API Keys Only Exist for Active Services
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [apikeys.googleapis.com]
+    collect:
+      - id: api_keys
+        gcloud: services api-keys list --project={{ .project }} --format=json
+      - id: enabled_services
+        gcloud: services list --enabled --project={{ .project }} --format=json
+    resource:
+      from: data.api_keys
+      kind: apikeys.googleapis.com/Key
+      name: r.name
+      empty: pass
+    check:
+      assert: |
+        size(r.?restrictions.?apiTargets.orValue([])) > 0
+        && r.restrictions.apiTargets.all(t,
+             t.?service.orValue("") in data.enabled_services.map(s, s.?config.?name.orValue("")))
+      message: "API key {{ .r.displayName }} ({{ .r.uid }}) is not scoped to services that are enabled in the project"
+    evidence:
+      - r.displayName
+      - "r.?restrictions.?apiTargets.orValue([]).map(t, t.?service.orValue(''))"
+      - "r.?restrictions.?apiTargets.orValue([]).filter(t, !(t.?service.orValue('') in data.enabled_services.map(s, s.?config.?name.orValue('')))).map(t, t.?service.orValue(''))"
+    remediation: gcloud services api-keys delete <KEY_ID>
+    references:
+      - https://cloud.google.com/docs/authentication/api-keys
+      - https://cloud.google.com/sdk/gcloud/reference/services/api-keys/list
+      - https://cloud.google.com/sdk/gcloud/reference/services/api-keys/delete
+    notes: |
+      The CIS audit treats every API key as a finding unless it is needed. Automated approximation: a key passes
+      only when its API restrictions (restrictions.apiTargets) are non-empty and every target service is enabled in
+      the project (gcloud services list --enabled, config.name). Keys without API restrictions are not tied to any
+      active service and fail, as do keys that still target disabled services. Actual key usage (request metrics)
+      is not evaluated. A project without API keys passes, which matches the CIS audit expectation that no keys are
+      listed.
+
+  - id: cis-gcp-1.14
+    ref: "1.14"
+    title: Ensure API Keys Are Restricted To Use by Only Specified Hosts and Apps
+    profile: L2
+    cis_assessment: manual
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [apikeys.googleapis.com]
+    collect:
+      - id: api_keys
+        gcloud: services api-keys list --project={{ .project }} --format=json
+    resource:
+      from: data.api_keys
+      kind: apikeys.googleapis.com/Key
+      name: r.name
+    params:
+      wildcard_referrer_patterns:
+        - '^(https?://)?\*(/.*)?$'
+        - '^(https?://)?\*\.[A-Za-z0-9-]+\.?(/.*)?$'
+        - '^(https?://)?\*\.(co|com|net|org|gov|edu|ac)\.[A-Za-z]{2}(/.*)?$'
+        - '^(https?://)?\*\.(appspot\.com|web\.app|firebaseapp\.com|run\.app|cloudfunctions\.net|github\.io|herokuapp\.com|vercel\.app|netlify\.app|pages\.dev)(/.*)?$'
+      any_host_ips: ["0.0.0.0", "0.0.0.0/0", "::", "::0", "::/0"]
+    check:
+      assert: |
+        (size(r.?restrictions.?browserKeyRestrictions.?allowedReferrers.orValue([])) > 0
+          && !r.restrictions.browserKeyRestrictions.allowedReferrers.exists(x,
+               params.wildcard_referrer_patterns.exists(p, x.matches(p))))
+        || (size(r.?restrictions.?serverKeyRestrictions.?allowedIps.orValue([])) > 0
+          && !r.restrictions.serverKeyRestrictions.allowedIps.exists(ip,
+               ip in params.any_host_ips || (ip.contains("/") && cidrIsPublic(ip))))
+        || size(r.?restrictions.?androidKeyRestrictions.?allowedApplications.orValue([])) > 0
+        || size(r.?restrictions.?iosKeyRestrictions.?allowedBundleIds.orValue([])) > 0
+      message: "API key {{ .r.displayName }} ({{ .r.uid }}) has no application restriction or allows any HTTP referrer or host"
+    evidence: [r.displayName, r.restrictions]
+    remediation: |
+      gcloud services api-keys update <KEY_ID> --allowed-referrers=<REFERRERS> | --allowed-ips=<IPS>
+        | --allowed-application=sha1_fingerprint=<SHA1>,package_name=<PACKAGE> | --allowed-bundle-ids=<BUNDLE_IDS>
+      or delete unused keys: gcloud services api-keys delete <KEY_ID>
+    references:
+      - https://cloud.google.com/docs/authentication/api-keys
+      - https://cloud.google.com/sdk/gcloud/reference/services/api-keys/list
+      - https://cloud.google.com/sdk/gcloud/reference/services/api-keys/update
+    notes: |
+      CIS marks this Manual, but the decision is structural and deterministic. A key passes only with an application
+      restriction that does not admit everyone: browser referrers with no wildcard entry (*, *.<tld>, *.<tld>/*,
+      public second-level suffixes such as *.co.uk, and shared hosting domains, all in wildcard_referrer_patterns),
+      server IPs with no any-host entry (any_host_ips, or any CIDR with prefix length 0), Android applications, or
+      iOS bundle IDs. Keys with no restrictions or only API restrictions fail, matching the CIS filter
+      -restrictions:*. The key string itself is never collected.
+
+  - id: cis-gcp-1.15
+    ref: "1.15"
+    title: Ensure API Keys Are Restricted to Only APIs That Application Needs Access
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [apikeys.googleapis.com]
+    collect:
+      - id: api_keys
+        gcloud: services api-keys list --project={{ .project }} --format=json
+    resource:
+      from: data.api_keys
+      kind: apikeys.googleapis.com/Key
+      name: r.name
+    params:
+      broad_services: [cloudapis.googleapis.com]
+    check:
+      assert: |
+        size(r.?restrictions.?apiTargets.orValue([])) > 0
+        && !r.restrictions.apiTargets.exists(t, t.?service.orValue("") in params.broad_services)
+      message: "API key {{ .r.displayName }} ({{ .r.uid }}) is not restricted to specific APIs"
+    evidence:
+      - r.displayName
+      - "r.?restrictions.?apiTargets.orValue([]).map(t, t.?service.orValue(''))"
+    remediation: |
+      gcloud services api-keys update <UID> --api-target=service=<SERVICE>
+      (or --flags-file=<FLAGS_FILE>.yaml listing one --api-target per required service; never cloudapis.googleapis.com)
+    references:
+      - https://cloud.google.com/docs/authentication/api-keys
+      - https://cloud.google.com/apis/docs/overview
+    notes: |
+      Fails when a key has no API restrictions (restrictions.apiTargets absent or empty), which is the CIS default
+      "API restrictions: None", or when it targets one of broad_services: cloudapis.googleapis.com is the "Google
+      Cloud APIs" umbrella that the CIS audit forbids. Whether every remaining API is actually needed by the
+      application is not evaluated; 1.13 reports targets that are not enabled in the project.
+
+  - id: cis-gcp-1.16
+    ref: "1.16"
+    title: Ensure API Keys Are Rotated Every 90 Days
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [apikeys.googleapis.com]
+    collect:
+      - id: api_keys
+        gcloud: services api-keys list --project={{ .project }} --format=json
+    resource:
+      from: data.api_keys
+      kind: apikeys.googleapis.com/Key
+      name: r.name
+    params:
+      max_age_days: 90
+    check:
+      assert: ctx.now - timestamp(r.createTime) <= days(params.max_age_days)
+      message: "API key {{ .r.displayName }} ({{ .r.uid }}) was created more than {{ .params.max_age_days }} days ago"
+    evidence: [r.displayName, r.createTime]
+    remediation: |
+      gcloud services api-keys create --display-name=<NEW_KEY_NAME>
+      gcloud services api-keys update <NEW_KEY_UID> <RESTRICTION_FLAGS>   (copy the old key's restrictions)
+      gcloud services api-keys delete <OLD_KEY_UID>
+    references:
+      - https://developers.google.com/maps/api-security-best-practices
+      - https://cloud.google.com/sdk/gcloud/reference/services/api-keys/update
+    notes: |
+      Fails when createTime is older than max_age_days, as in the CIS audit. gcloud cannot regenerate a key in place:
+      rotation means creating a replacement key, copying its restrictions and deleting the old key, so createTime is
+      the key's age. Soft-deleted keys are not listed.
+
+  - id: cis-gcp-1.17
+    ref: "1.17"
+    title: Ensure Essential Contacts is Configured for Organization
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: organization
+    evaluate_per: organization
+    requires: [org-access]
+    collect:
+      - id: contacts
+        gcloud: essential-contacts list --organization={{ .organization }} --format=json
+    params:
+      required_categories: [LEGAL, SECURITY, SUSPENSION, TECHNICAL]
+    check:
+      assert: |
+        params.required_categories.all(c,
+          data.contacts.exists(ct,
+            ct.?validationState.orValue("VALID") != "INVALID"
+            && ct.?notificationCategorySubscriptions.orValue([]).exists(s, s == c || s == "ALL")))
+      message: "Organization Essential Contacts do not cover every required notification category {{ .params.required_categories }} (see evidence)"
+    evidence:
+      - "params.required_categories.filter(c, !data.contacts.exists(ct, ct.?validationState.orValue('VALID') != 'INVALID' && ct.?notificationCategorySubscriptions.orValue([]).exists(s, s == c || s == 'ALL')))"
+      - "data.contacts.map(ct, ct.?email.orValue('') + ' ' + ct.?notificationCategorySubscriptions.orValue([]).join(',') + ' ' + ct.?validationState.orValue(''))"
+    remediation: |
+      gcloud essential-contacts create --email=<EMAIL> --notification-categories=<NOTIFICATION_CATEGORIES> --organization=<ORGANIZATION_ID>
+    references:
+      - https://cloud.google.com/resource-manager/docs/managing-notification-contacts
+    notes: |
+      Lists the Essential Contacts set directly on the organization and requires, for every category in
+      required_categories (LEGAL, SECURITY, SUSPENSION and TECHNICAL per CIS), at least one contact subscribed to that
+      category or to ALL whose validationState is not INVALID. Whether the addresses are appropriate is not
+      evaluated. Folder- or project-level contacts do not satisfy this organization-level recommendation; when
+      organization access is unavailable the rule is SKIPPED, and project contacts can be checked manually as a
+      fallback with gcloud essential-contacts list --project=<PROJECT_ID>. essentialcontacts.googleapis.com is not
+      declared in services because this organization-level call does not depend on the scanned project's enabled
+      APIs.
+
+  - id: cis-gcp-1.18
+    ref: "1.18"
+    title: Ensure Secrets are Not Stored in Cloud Functions Environment Variables by Using Secret Manager
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: project
+    services: [cloudfunctions.googleapis.com]
+    collect:
+      - id: functions
+        gcloud: functions list --project={{ .project }} --format=json
+    resource:
+      from: data.functions
+      kind: cloudfunctions.googleapis.com/Function
+      name: r.name
+    params:
+      name_patterns:
+        - '(?i)(secret|passw(or)?d|token|api[_-]?key|private[_-]?key|credential)'
+      value_patterns:
+        - '^AIza[0-9A-Za-z_-]{35}$'
+        - '-----BEGIN [A-Z ]*PRIVATE KEY'
+        - '^ya29\.'
+        - '^(AKIA|ASIA)[0-9A-Z]{16}$'
+        - '^gh[pousr]_[0-9A-Za-z]{36,}$'
+        - '^xox[abposr]-'
+      allowlist_names: []
+    check:
+      assert: |
+        ![r.?environmentVariables.orValue({}), r.?buildEnvironmentVariables.orValue({}),
+          r.?serviceConfig.?environmentVariables.orValue({}), r.?buildConfig.?environmentVariables.orValue({})]
+          .exists(env, env.exists(k,
+            !(k in params.allowlist_names)
+            && params.value_patterns.exists(p, string(env[k]).matches(p))))
+      review_when: |
+        [r.?environmentVariables.orValue({}), r.?buildEnvironmentVariables.orValue({}),
+         r.?serviceConfig.?environmentVariables.orValue({}), r.?buildConfig.?environmentVariables.orValue({})]
+          .exists(env, env.exists(k,
+            !(k in params.allowlist_names)
+            && params.name_patterns.exists(p, k.matches(p))))
+      message: "Cloud Function {{ .r.name }} stores a value matching a known credential format in a plain environment variable"
+      review_message: "Cloud Function {{ .r.name }} has environment variable names that suggest secrets; confirm they hold no secret values (move secrets to Secret Manager) or add the names to params.allowlist_names"
+    evidence:
+      - |
+        [r.?environmentVariables.orValue({}), r.?buildEnvironmentVariables.orValue({}),
+         r.?serviceConfig.?environmentVariables.orValue({}), r.?buildConfig.?environmentVariables.orValue({})]
+          .map(env, env.filter(k,
+            !(k in params.allowlist_names)
+            && (params.name_patterns.exists(p, k.matches(p))
+                || params.value_patterns.exists(p, string(env[k]).matches(p)))))
+          .flatten()
+      - "(r.?secretEnvironmentVariables.orValue([]) + r.?serviceConfig.?secretEnvironmentVariables.orValue([])).map(s, s.?key.orValue(''))"
+    remediation: |
+      gcloud secrets create <SECRET_ID> --data-file=<FILE>
+      gcloud functions deploy <FUNCTION> --set-secrets=<ENV_VAR>=<SECRET_ID>:latest --remove-env-vars=<ENV_VARS>
+    references:
+      - https://cloud.google.com/functions/docs/configuring/env-var#managing_secrets
+      - https://cloud.google.com/secret-manager/docs/overview
+    notes: |
+      gcloud functions list returns both generations: gen1 functions carry environmentVariables and
+      buildEnvironmentVariables, gen2 functions carry serviceConfig.environmentVariables and
+      buildConfig.environmentVariables; all four maps are inspected. Values matching value_patterns (Google API
+      keys, PEM private keys, OAuth access tokens, AWS, GitHub and Slack tokens) fail. Variable names matching
+      name_patterns produce REVIEW, because a name alone does not prove the value is a secret; this replaces the
+      CIS manual review of each variable. Names in allowlist_names are skipped by both checks. Tune name_patterns,
+      value_patterns and allowlist_names. Evidence reports variable names only, never values; Secret Manager
+      references (secretEnvironmentVariables) are compliant and listed separately. Whether the Secret Manager API is
+      enabled (a CIS audit step) is informational and not evaluated. Projects without functions are NOT_APPLICABLE.

@@ -1,0 +1,539 @@
+dsl_version: 1
+benchmark:
+  id: cis-gcp-foundation
+  version: "5.0.0"
+  section: "6"
+  title: Cloud SQL Database Services (MySQL and PostgreSQL flags)
+rules:
+  - id: cis-gcp-6.1.1
+    ref: "6.1.1"
+    title: Ensure That a MySQL Instance Does Not Allow Anyone To Connect With Administrative Privileges
+    profile: L1
+    cis_assessment: manual
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+      - id: users
+        foreach: |
+          data.sql_instances.filter(i,
+            i.?databaseVersion.orValue("").startsWith("MYSQL")
+            && i.?instanceType.orValue("CLOUD_SQL_INSTANCE") == "CLOUD_SQL_INSTANCE"
+            && i.?state.orValue("") == "RUNNABLE"
+            && i.?settings.?activationPolicy.orValue("ALWAYS") != "NEVER")
+        as: i
+        attach: users
+        gcloud: sql users list --instance={{ .i.name }} --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: |
+        r.?databaseVersion.orValue("").startsWith("MYSQL")
+        && r.?instanceType.orValue("CLOUD_SQL_INSTANCE") == "CLOUD_SQL_INSTANCE"
+        && r.?state.orValue("") == "RUNNABLE"
+        && r.?settings.?activationPolicy.orValue("ALWAYS") != "NEVER"
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      admin_users: [root]
+      open_hosts: ["%", ""]
+    check:
+      assert: |
+        !r.?users.orValue([]).exists(u,
+          u.name in params.admin_users
+          && u.?type.orValue("BUILT_IN") == "BUILT_IN"
+          && u.?host.orValue("") in params.open_hosts)
+      message: "MySQL instance {{ .r.name }} has a built-in admin user from {{ .params.admin_users }} that accepts connections from any host; the Admin API cannot confirm that its password is set"
+    evidence:
+      - 'r.?users.orValue([]).map(u, u.name + "@" + u.?host.orValue("") + " " + u.?type.orValue("BUILT_IN"))'
+      - r.?settings.?ipConfiguration.?ipv4Enabled.orValue(false)
+      - 'r.?settings.?ipConfiguration.?authorizedNetworks.orValue([]).map(n, n.?value.orValue(""))'
+    remediation: |
+      Set a strong root password (CIS): gcloud sql users set-password root --host=% --instance=<INSTANCE> --prompt-for-password
+      To clear this finding, restrict the admin account to trusted hosts or use IAM database authentication:
+      gcloud sql users create root --host=<TRUSTED_HOST> --instance=<INSTANCE> --password=<PASSWORD>
+      then, after verifying access: gcloud sql users delete root --host=% --instance=<INSTANCE>
+    references:
+      - https://cloud.google.com/sql/docs/mysql/create-manage-users
+      - https://cloud.google.com/sql/docs/mysql/create-instance
+    notes: |
+      CIS audits this by connecting as root without a password; the scanner opens no database
+      connections and the Admin API never exposes whether a password is set. The rule therefore
+      fails when a built-in user named in admin_users is defined for any host (host in open_hosts),
+      i.e. an administrative account that any client address may try, guarded at most by a password.
+      This is stricter than CIS: Cloud SQL creates root@'%' by default, so an instance with a strong
+      root password still fails until the account is host-restricted, replaced by IAM database
+      authentication, or exempted. Users are listed only for running primary MySQL instances
+      (instanceType CLOUD_SQL_INSTANCE, state RUNNABLE, activationPolicy not NEVER): replicas inherit
+      users from their primary and user listing fails on stopped instances, so those are not
+      evaluated. Public IP and authorized networks are reported as evidence; network exposure itself
+      is covered by 6.5 and 6.7. Add other privileged built-in accounts to admin_users.
+
+  - id: cis-gcp-6.1.2
+    ref: "6.1.2"
+    title: Ensure ‘Skip_show_database’ Database Flag for Cloud SQL MySQL Instance Is Set to ‘On’
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: 'r.?databaseVersion.orValue("").startsWith("MYSQL") && r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"'
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: skip_show_database
+      expected: "on"
+    check:
+      assert: |
+        r.?settings.?databaseFlags.orValue([]).exists(f,
+          f.name == params.flag && f.?value.orValue("").lowerAscii() == params.expected)
+      message: "MySQL instance {{ .r.name }} does not set {{ .params.flag }} to {{ .params.expected }}"
+    evidence:
+      - r.databaseVersion
+      - 'r.?settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=skip_show_database=on
+      (--database-flags replaces every flag on the instance; include the existing flags in the same command)
+    references:
+      - https://cloud.google.com/sql/docs/mysql/flags
+      - https://dev.mysql.com/doc/refman/5.7/en/server-system-variables.html#sysvar_skip_show_database
+    notes: |
+      Mirrors the CIS CLI audit, which expects the flag to be returned with value on. CIS states no
+      default; the MySQL default is OFF, so an unset flag fails. Values are compared
+      case-insensitively. Source representation instances (instanceType ON_PREMISES_INSTANCE) are
+      excluded because Cloud SQL does not manage their flags; read replicas are evaluated because
+      flags are set per instance.
+
+  - id: cis-gcp-6.1.3
+    ref: "6.1.3"
+    title: Ensure That the ‘Local_infile’ Database Flag for a Cloud SQL MySQL Instance Is Set to ‘Off’
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: 'r.?databaseVersion.orValue("").startsWith("MYSQL") && r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"'
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: local_infile
+      expected: "off"
+    check:
+      assert: |
+        r.?settings.?databaseFlags.orValue([]).exists(f,
+          f.name == params.flag && f.?value.orValue("").lowerAscii() == params.expected)
+      message: "MySQL instance {{ .r.name }} does not set {{ .params.flag }} to {{ .params.expected }} (the default is on)"
+    evidence:
+      - r.databaseVersion
+      - 'r.?settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=local_infile=off
+      (--database-flags replaces every flag on the instance; include the existing flags in the same command)
+    references:
+      - https://cloud.google.com/sql/docs/mysql/flags
+      - https://dev.mysql.com/doc/refman/5.7/en/server-system-variables.html#sysvar_local_infile
+    notes: |
+      The CIS default is on, so the flag must be explicitly set to off and an unset flag fails, as in
+      the CIS CLI audit. Values are compared case-insensitively. Source representation instances
+      (instanceType ON_PREMISES_INSTANCE) are excluded because Cloud SQL does not manage their flags;
+      read replicas are evaluated because flags are set per instance.
+
+  - id: cis-gcp-6.2.1
+    ref: "6.2.1"
+    title: Ensure ‘Log_error_verbosity’ Database Flag for Cloud SQL PostgreSQL Instance Is Set to ‘DEFAULT’ or Stricter
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: 'r.?databaseVersion.orValue("").startsWith("POSTGRES") && r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"'
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: log_error_verbosity
+      allowed_values: [default, verbose]
+      unset_value: default  # effective value when the flag is not set
+    check:
+      assert: |
+        (r.?settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag)
+          ? r.settings.databaseFlags.filter(f, f.name == params.flag).map(f, f.?value.orValue("").lowerAscii())
+          : [params.unset_value]
+        ).all(v, v in params.allowed_values)
+      message: "PostgreSQL instance {{ .r.name }}: effective {{ .params.flag }} (configured, or {{ .params.unset_value }} when unset) is not in {{ .params.allowed_values }}"
+    evidence:
+      - r.databaseVersion
+      - 'r.?settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=log_error_verbosity=default
+      (--database-flags replaces every flag on the instance; include the existing flags in the same command)
+    references:
+      - https://cloud.google.com/sql/docs/postgres/flags
+      - https://www.postgresql.org/docs/current/runtime-config-logging.html#GUC-LOG-ERROR-VERBOSITY
+    notes: |
+      The default (DEFAULT) is compliant, so an unset flag passes: the effective value is the
+      configured value, or unset_value when the flag is not set, and it must be in allowed_values.
+      CIS does not define "stricter"; this rule reads it as at least the DEFAULT level of detail, so
+      TERSE, which drops DETAIL, HINT, QUERY and CONTEXT from error logs, fails. Organizations that
+      read "stricter" as less verbose can set allowed_values to [terse, default]. Values are compared
+      case-insensitively. Source representation instances (instanceType ON_PREMISES_INSTANCE) are
+      excluded.
+
+  - id: cis-gcp-6.2.2
+    ref: "6.2.2"
+    title: Ensure That the ‘Log_connections’ Database Flag for Cloud SQL PostgreSQL Instance Is Set to ‘On’
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: 'r.?databaseVersion.orValue("").startsWith("POSTGRES") && r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"'
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: log_connections
+      expected: "on"
+    check:
+      assert: |
+        r.?settings.?databaseFlags.orValue([]).exists(f,
+          f.name == params.flag && f.?value.orValue("").lowerAscii() == params.expected)
+      message: "PostgreSQL instance {{ .r.name }} does not set {{ .params.flag }} to {{ .params.expected }} (the default is off)"
+    evidence:
+      - r.databaseVersion
+      - 'r.?settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=log_connections=on
+      (--database-flags replaces every flag on the instance; include the existing flags in the same command)
+    references:
+      - https://cloud.google.com/sql/docs/postgres/flags
+      - https://www.postgresql.org/docs/current/runtime-config-logging.html#GUC-LOG-CONNECTIONS
+    notes: |
+      The CIS default is off, so the flag must be explicitly set to on and an unset flag fails, as in
+      the CIS CLI audit. Values are compared case-insensitively. Source representation instances
+      (instanceType ON_PREMISES_INSTANCE) are excluded because Cloud SQL does not manage their flags;
+      read replicas are evaluated because flags are set per instance.
+
+  - id: cis-gcp-6.2.3
+    ref: "6.2.3"
+    title: Ensure That the ‘Log_disconnections’ Database Flag for Cloud SQL PostgreSQL Instance Is Set to ‘On’
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: 'r.?databaseVersion.orValue("").startsWith("POSTGRES") && r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"'
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: log_disconnections
+      expected: "on"
+    check:
+      assert: |
+        r.?settings.?databaseFlags.orValue([]).exists(f,
+          f.name == params.flag && f.?value.orValue("").lowerAscii() == params.expected)
+      message: "PostgreSQL instance {{ .r.name }} does not set {{ .params.flag }} to {{ .params.expected }} (the default is off)"
+    evidence:
+      - r.databaseVersion
+      - 'r.?settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=log_disconnections=on
+      (--database-flags replaces every flag on the instance; include the existing flags in the same command)
+    references:
+      - https://cloud.google.com/sql/docs/postgres/flags
+      - https://www.postgresql.org/docs/current/runtime-config-logging.html#GUC-LOG-DISCONNECTIONS
+    notes: |
+      The CIS default is off, so the flag must be explicitly set to on and an unset flag fails, as in
+      the CIS CLI audit. Values are compared case-insensitively. Source representation instances
+      (instanceType ON_PREMISES_INSTANCE) are excluded because Cloud SQL does not manage their flags;
+      read replicas are evaluated because flags are set per instance.
+
+  - id: cis-gcp-6.2.4
+    ref: "6.2.4"
+    title: Ensure ‘Log_statement’ Database Flag for Cloud SQL PostgreSQL Instance Is Set Appropriately
+    profile: L2
+    cis_assessment: automated
+    mode: contextual
+    severity: low
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: 'r.?databaseVersion.orValue("").startsWith("POSTGRES") && r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"'
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: log_statement
+      allowed_values: [ddl]
+      review_values: [mod, all]
+      unset_value: none  # effective value when the flag is not set
+    check:
+      assert: |
+        (r.?settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag)
+          ? r.settings.databaseFlags.filter(f, f.name == params.flag).map(f, f.?value.orValue("").lowerAscii())
+          : [params.unset_value]
+        ).all(v, v in params.allowed_values || v in params.review_values)
+      review_when: |
+        (r.?settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag)
+          ? r.settings.databaseFlags.filter(f, f.name == params.flag).map(f, f.?value.orValue("").lowerAscii())
+          : [params.unset_value]
+        ).exists(v, v in params.review_values && !(v in params.allowed_values))
+      message: "PostgreSQL instance {{ .r.name }}: effective {{ .params.flag }} (configured, or {{ .params.unset_value }} when unset) is not in {{ .params.allowed_values }}"
+      review_message: "PostgreSQL instance {{ .r.name }} sets {{ .params.flag }} to a value in {{ .params.review_values }}, which logs more than DDL; confirm it matches the organization's logging policy (CIS recommends ddl)"
+    evidence:
+      - r.databaseVersion
+      - 'r.?settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=log_statement=ddl
+      (--database-flags replaces every flag on the instance; include the existing flags in the same command)
+    references:
+      - https://cloud.google.com/sql/docs/postgres/flags
+      - https://www.postgresql.org/docs/current/runtime-config-logging.html#GUC-LOG-STATEMENT
+    notes: |
+      "Set appropriately" depends on the organization's logging policy (CIS recommends ddl unless the
+      policy directs otherwise), so the policy is held in params. The effective value is the
+      configured value, or unset_value (none, the default) when the flag is not set. Values in
+      allowed_values pass; values in review_values produce REVIEW because mod and all log DDL plus
+      data-modifying or all statements, which raises log volume and may capture sensitive data;
+      anything else, including none, fails. Tune allowed_values and review_values to the logging
+      policy (for example add all to allowed_values) to make the result deterministic. Values are
+      compared case-insensitively. Source representation instances (instanceType
+      ON_PREMISES_INSTANCE) are excluded.
+
+  - id: cis-gcp-6.2.5
+    ref: "6.2.5"
+    title: Ensure that the ‘Log_min_messages’ Flag for a Cloud SQL PostgreSQL Instance is set at minimum to 'Warning'
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: 'r.?databaseVersion.orValue("").startsWith("POSTGRES") && r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"'
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: log_min_messages
+      min_level: warning
+      unset_value: warning  # effective value when the flag is not set
+      severity_rank:  # PostgreSQL message severity, lowest to highest
+        debug5: 0
+        debug4: 1
+        debug3: 2
+        debug2: 3
+        debug1: 4
+        info: 5
+        notice: 6
+        warning: 7
+        error: 8
+        log: 9
+        fatal: 10
+        panic: 11
+    check:
+      assert: |
+        (r.?settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag)
+          ? r.settings.databaseFlags.filter(f, f.name == params.flag).map(f, f.?value.orValue("").lowerAscii())
+          : [params.unset_value]
+        ).all(v, v in params.severity_rank
+             && params.severity_rank[v] >= params.severity_rank[params.min_level])
+      message: "PostgreSQL instance {{ .r.name }}: effective {{ .params.flag }} (configured, or {{ .params.unset_value }} when unset) is below {{ .params.min_level }} or not a valid level"
+    evidence:
+      - r.databaseVersion
+      - 'r.?settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=log_min_messages=warning
+      (or error, the CIS best practice; --database-flags replaces every flag on the instance, so include the existing flags)
+    references:
+      - https://cloud.google.com/sql/docs/postgres/flags
+      - https://www.postgresql.org/docs/current/runtime-config-logging.html#GUC-LOG-MIN-MESSAGES
+    notes: |
+      The PostgreSQL severity order (debug5 lowest to panic highest) is held in severity_rank, and the
+      effective value (configured value, or unset_value when the flag is not set) must rank at or
+      above min_level. CIS states the default is ERROR while PostgreSQL documents WARNING; both meet
+      the default threshold, so an unset flag passes, and unset_value is the lower of the two so that
+      raising min_level to error (the CIS best practice) cannot pass an unset instance by accident.
+      Unknown values fail. Ranks are a map because the CEL lists extension has no list indexOf.
+      Source representation instances (instanceType ON_PREMISES_INSTANCE) are excluded.
+
+  - id: cis-gcp-6.2.6
+    ref: "6.2.6"
+    title: Ensure ‘Log_min_error_statement’ Database Flag for Cloud SQL PostgreSQL Instance Is Set to ‘Error’ or Stricter
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: 'r.?databaseVersion.orValue("").startsWith("POSTGRES") && r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"'
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: log_min_error_statement
+      min_level: error
+      unset_value: error  # effective value when the flag is not set
+      severity_rank:  # PostgreSQL message severity, lowest to highest
+        debug5: 0
+        debug4: 1
+        debug3: 2
+        debug2: 3
+        debug1: 4
+        info: 5
+        notice: 6
+        warning: 7
+        error: 8
+        log: 9
+        fatal: 10
+        panic: 11
+    check:
+      assert: |
+        (r.?settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag)
+          ? r.settings.databaseFlags.filter(f, f.name == params.flag).map(f, f.?value.orValue("").lowerAscii())
+          : [params.unset_value]
+        ).all(v, v in params.severity_rank
+             && params.severity_rank[v] >= params.severity_rank[params.min_level])
+      message: "PostgreSQL instance {{ .r.name }}: effective {{ .params.flag }} (configured, or {{ .params.unset_value }} when unset) is below {{ .params.min_level }} or not a valid level"
+    evidence:
+      - r.databaseVersion
+      - 'r.?settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=log_min_error_statement=error
+      (--database-flags replaces every flag on the instance; include the existing flags in the same command)
+    references:
+      - https://cloud.google.com/sql/docs/postgres/flags
+      - https://www.postgresql.org/docs/current/runtime-config-logging.html#GUC-LOG-MIN-ERROR-STATEMENT
+    notes: |
+      Same ordering technique as 6.2.5 with min_level error. The default (ERROR, per CIS and
+      PostgreSQL) is compliant, so an unset flag passes; explicit values below error (debug5 to
+      warning) and unknown values fail. Source representation instances (instanceType
+      ON_PREMISES_INSTANCE) are excluded.
+
+  - id: cis-gcp-6.2.7
+    ref: "6.2.7"
+    title: Ensure That the ‘Log_min_duration_statement’ Database Flag for Cloud SQL PostgreSQL Instance Is Set to '-1' (Disabled)
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: 'r.?databaseVersion.orValue("").startsWith("POSTGRES") && r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"'
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: log_min_duration_statement
+      expected: "-1"
+    check:
+      assert: |
+        !r.?settings.?databaseFlags.orValue([]).exists(f,
+          f.name == params.flag && f.?value.orValue("") != params.expected)
+      message: "PostgreSQL instance {{ .r.name }} sets {{ .params.flag }} to a value other than {{ .params.expected }}, so statement text is logged"
+    evidence:
+      - r.databaseVersion
+      - 'r.?settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=log_min_duration_statement=-1
+      (--database-flags replaces every flag on the instance; include the existing flags in the same command)
+    references:
+      - https://cloud.google.com/sql/docs/postgres/flags
+      - https://www.postgresql.org/docs/current/runtime-config-logging.html#GUC-LOG-MIN-DURATION-STATEMENT
+    notes: |
+      The default (-1, disabled) is compliant, so an unset flag passes and only an explicit value
+      other than -1 fails. Flag values are strings in the Admin API, so the comparison is against
+      "-1". Source representation instances (instanceType ON_PREMISES_INSTANCE) are excluded.
+
+  - id: cis-gcp-6.2.8
+    ref: "6.2.8"
+    title: Ensure That 'cloudsql.enable_pgaudit' Database Flag for each Cloud Sql Postgresql Instance Is Set to 'on' For Centralized Logging
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: 'r.?databaseVersion.orValue("").startsWith("POSTGRES") && r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"'
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: cloudsql.enable_pgaudit
+      expected: "on"
+      require_pgaudit_log: false  # true also requires a pgaudit.log flag that logs at least one class
+    check:
+      assert: |
+        r.?settings.?databaseFlags.orValue([]).exists(f,
+          f.name == params.flag && f.?value.orValue("").lowerAscii() == params.expected)
+        && (!params.require_pgaudit_log
+            || r.?settings.?databaseFlags.orValue([]).exists(f,
+                 f.name == "pgaudit.log" && !(f.?value.orValue("").lowerAscii() in ["", "none"])))
+      message: "PostgreSQL instance {{ .r.name }} does not set {{ .params.flag }} to {{ .params.expected }}, or require_pgaudit_log is true and no pgaudit.log flag logs at least one class"
+    evidence:
+      - r.databaseVersion
+      - 'r.?settings.?databaseFlags.orValue([]).filter(f, f.name in [params.flag, "pgaudit.log"])'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=cloudsql.enable_pgaudit=on,pgaudit.log=all
+      (restarts the instance; --database-flags replaces every flag, so include the existing flags)
+      then, as a superuser: CREATE EXTENSION pgaudit;
+    references:
+      - https://cloud.google.com/sql/docs/postgres/flags#list-flags-postgres
+      - https://cloud.google.com/sql/docs/postgres/pg-audit#enable-auditing-flag
+      - https://cloud.google.com/sql/docs/postgres/pg-audit#customizing-database-audit-logging
+    notes: |
+      The CIS default is off, so the flag must be explicitly set to on. The other CIS audit steps
+      (pgaudit extension created with CREATE EXTENSION, Data Access audit logs enabled, PgAuditEntry
+      records visible in Logs Explorer) need a database connection or roles/logging.privateLogViewer,
+      whose absence would SKIP the whole rule, so they are not automated. The CIS remediation also
+      sets pgaudit.log=all; set require_pgaudit_log to true to additionally require a pgaudit.log flag
+      that logs at least one class (not none). Values are compared case-insensitively. Source
+      representation instances (instanceType ON_PREMISES_INSTANCE) are excluded.

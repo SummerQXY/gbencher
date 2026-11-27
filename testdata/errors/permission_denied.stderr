@@ -1,0 +1,1 @@
+ERROR: (gcloud compute instances list) PERMISSION_DENIED: Required 'compute.instances.list' permission for 'projects/example-prod'.

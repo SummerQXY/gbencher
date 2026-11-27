@@ -1,0 +1,30 @@
+# Lint fixture: the only defect is a flag the engine controls (the identity a command runs as). A
+# rule may not set it, whatever the value.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-flag-forbidden-1
+    ref: "1.1"
+    title: Fixture with a flag that rules may not set
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --impersonate-service-account=scanner@example-sec.iam.gserviceaccount.com --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: r.name
+    check:
+      assert: r.status == "RUNNING"
+      message: "Instance {{ .r.name }} is not running"
+    remediation: Start the instance.
+    notes: Fixture for the lint tests.

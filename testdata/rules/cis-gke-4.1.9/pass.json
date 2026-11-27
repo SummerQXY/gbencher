@@ -1,0 +1,77 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {
+    "cr": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleList",
+      "items": []
+    },
+    "roles": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleList",
+      "items": []
+    },
+    "crb": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBindingList",
+      "items": [
+        {
+          "apiVersion": "rbac.authorization.k8s.io/v1",
+          "kind": "ClusterRoleBinding",
+          "metadata": {
+            "name": "custom-viewer"
+          },
+          "roleRef": {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "ClusterRole",
+            "name": "view"
+          },
+          "subjects": [
+            {
+              "kind": "User",
+              "name": "reader"
+            }
+          ]
+        }
+      ]
+    },
+    "rb": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBindingList",
+      "items": []
+    },
+    "serviceaccounts": {
+      "apiVersion": "v1",
+      "kind": "ServiceAccountList",
+      "items": []
+    },
+    "pods": {
+      "apiVersion": "v1",
+      "kind": "PodList",
+      "items": []
+    },
+    "replicasets": {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSetList",
+      "items": []
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-4.1.9",
+      "resource_key": "projects/example-project/cluster/custom-viewer",
+      "status": "PASS"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "crb": "schema",
+      "rb": "schema"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:gbench:schema:profile:1",
+  "title": "gbench profile",
+  "description": "Selects rules and overrides rule params. Unknown keys are rejected at every level.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["dsl_version"],
+  "properties": {
+    "dsl_version": { "type": "integer", "const": 1 },
+    "name": { "type": "string" },
+    "benchmarks": {
+      "description": "Benchmark selectors of the form <id>@<version>.",
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*@[^@\\s]+$" }
+    },
+    "levels": { "type": "array", "items": { "type": "string", "enum": ["L1", "L2"] } },
+    "include": { "type": "array", "items": { "$ref": "#/$defs/rule_glob" } },
+    "exclude": { "type": "array", "items": { "$ref": "#/$defs/rule_glob" } },
+    "overrides": {
+      "description": "Keys are exact rule ids; only params can be overridden.",
+      "type": "object",
+      "patternProperties": {
+        "^[a-z][a-z0-9-]*[a-z0-9](\\.[0-9]+)*$": { "$ref": "#/$defs/override" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "rule_glob": { "type": "string", "minLength": 1 },
+    "override": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "params": { "type": "object" }
+      }
+    }
+  }
+}

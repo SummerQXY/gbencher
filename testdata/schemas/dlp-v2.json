@@ -1,0 +1,56 @@
+{
+  "resources": {
+    "projects.locations.discoveryConfigs.list": {
+      "httpMethod": "GET",
+      "parameters": {
+        "orderBy": {
+          "location": "query",
+          "type": "string"
+        },
+        "pageSize": {
+          "location": "query",
+          "type": "integer"
+        },
+        "pageToken": {
+          "location": "query",
+          "type": "string"
+        },
+        "parent": {
+          "location": "path",
+          "type": "string"
+        }
+      },
+      "response": {
+        "$ref": "GooglePrivacyDlpV2ListDiscoveryConfigsResponse"
+      }
+    }
+  },
+  "schemas": {
+    "GooglePrivacyDlpV2BigQueryDiscoveryTarget": {
+      "disabled": {
+        "$ref": "GooglePrivacyDlpV2Disabled"
+      }
+    },
+    "GooglePrivacyDlpV2Disabled": {},
+    "GooglePrivacyDlpV2DiscoveryConfig": {
+      "name": true,
+      "status": true,
+      "targets": {
+        "$array": "GooglePrivacyDlpV2DiscoveryTarget"
+      }
+    },
+    "GooglePrivacyDlpV2DiscoveryTarget": {
+      "bigQueryTarget": {
+        "$ref": "GooglePrivacyDlpV2BigQueryDiscoveryTarget"
+      }
+    },
+    "GooglePrivacyDlpV2ListDiscoveryConfigsResponse": {
+      "discoveryConfigs": {
+        "$array": "GooglePrivacyDlpV2DiscoveryConfig"
+      },
+      "nextPageToken": true
+    }
+  },
+  "source": "https://dlp.googleapis.com/$discovery/rest?version=v2",
+  "version": "v2"
+}

@@ -1,0 +1,29 @@
+# Lint fixture: the only defect is a reference to a context field that does not exist.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-ctx-ref-unknown-1
+    ref: "1.1"
+    title: Fixture that reads a context field that does not exist
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: r.name
+    check:
+      assert: r.zone.endsWith(ctx.region)
+      message: "Instance {{ .r.name }} is not in the expected region"
+    remediation: Move the instance.
+    notes: Fixture for the lint tests.

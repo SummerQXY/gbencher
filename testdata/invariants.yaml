@@ -1,0 +1,104 @@
+# Invariants for the rule corpus that must hold after every revision. The tests in
+# internal/rule/corpus_b_test.go verify that the corpus matches these values exactly.
+#
+# must_exist_rules: rules where a disabled API must produce FAIL (or REVIEW), never
+# NOT_APPLICABLE. Each entry lists the rule id, the services that MUST NOT be declared,
+# and the steps that must use on_error: empty so that SERVICE_DISABLED turns the step
+# into an empty result instead of making the rule NOT_APPLICABLE.
+must_exist_rules:
+  - {id: cis-gcp-2.3,  forbid_services: [logging.googleapis.com],                on_error_empty_steps: [sinks]}
+  - {id: cis-gcp-2.5,  forbid_services: [logging.googleapis.com, monitoring.googleapis.com], on_error_empty_steps: [metrics, alert_policies]}
+  - {id: cis-gcp-2.6,  forbid_services: [logging.googleapis.com, monitoring.googleapis.com], on_error_empty_steps: [metrics, alert_policies]}
+  - {id: cis-gcp-2.7,  forbid_services: [logging.googleapis.com, monitoring.googleapis.com], on_error_empty_steps: [metrics, alert_policies]}
+  - {id: cis-gcp-2.8,  forbid_services: [logging.googleapis.com, monitoring.googleapis.com], on_error_empty_steps: [metrics, alert_policies]}
+  - {id: cis-gcp-2.9,  forbid_services: [logging.googleapis.com, monitoring.googleapis.com], on_error_empty_steps: [metrics, alert_policies]}
+  - {id: cis-gcp-2.10, forbid_services: [logging.googleapis.com, monitoring.googleapis.com], on_error_empty_steps: [metrics, alert_policies]}
+  - {id: cis-gcp-2.11, forbid_services: [logging.googleapis.com, monitoring.googleapis.com], on_error_empty_steps: [metrics, alert_policies]}
+  - {id: cis-gcp-2.12, forbid_services: [logging.googleapis.com, monitoring.googleapis.com], on_error_empty_steps: [metrics, alert_policies]}
+  - {id: cis-gcp-2.15, forbid_services: [logging.googleapis.com],                on_error_empty_steps: [logs]}
+
+# on_error_empty_steps: every (rule, step) pair in the whole corpus that uses
+# on_error: empty. The test verifies this set in both directions: an extra pair in
+# the corpus or a missing one from this list must both fail.
+#
+# Review of the 16 pre-existing steps (post-narrowing: empty applies only to
+# NOT_FOUND, SERVICE_DISABLED and FAILED_PRECONDITION; every other failure is ERROR):
+#
+# 1.  cis-gcp-1.1.4 effective_policies: keep — unknown constraint (NOT_FOUND) and
+#     disabled API (SERVICE_DISABLED) both mean "not configured", which is the intent.
+# 2.  cis-gcp-1.2 domain_restriction: keep — SERVICE_DISABLED or NOT_FOUND means no
+#     domain restriction policy exists and the assert reacts accordingly.
+# 3.  cis-gcp-1.2 directory_users: keep — SERVICE_DISABLED or NOT_FOUND means no
+#     directory users; transient errors becoming ERROR is correct.
+# 4.  cis-gcp-2.4 buckets: keep — SERVICE_DISABLED (Cloud Storage API off) means no
+#     bucket is found, so every sink destination is unmatched → REVIEW.
+# 5.  cis-gcp-2.13 dns_policies: keep — SERVICE_DISABLED means no DNS policy exists,
+#     so every network fails; the API is deliberately not in services.
+# 6.  cis-gcp-2.16 settings: keep — notes explicitly say "API-not-enabled and
+#     FAILED_PRECONDITION errors both mean 'not enabled'", matching narrow semantics.
+# 7.  cis-gcp-3.8 policies: keep — notes say "an Access Context Manager API that is
+#     not enabled means no policy exists", SERVICE_DISABLED → empty → fail.
+# 8.  cis-gcp-4.4 oslogin_policy: keep — notes say "a disabled Org Policy API only
+#     removes that signal"; SERVICE_DISABLED → empty → removed signal.
+# 9.  cis-gcp-4.10 versions: keep — SERVICE_DISABLED or NOT_FOUND (no App Engine app)
+#     produces empty population → NOT_APPLICABLE, matching project without App Engine.
+# 10. cis-gcp-4.12 inventories: keep — a disabled API becomes an empty inventory list;
+#     the default optional policy produces REVIEW, while require_os_inventory=true produces
+#     FAIL. Permission failures remain SKIPPED and other collection errors remain ERROR.
+# 11. cis-gcp-7.4 discovery_configs: keep — notes say "when the API is disabled,
+#     on_error: empty turns the step into an empty list and the assertion fails";
+#     SERVICE_DISABLED → empty → fail.
+# 12. cis-gcp-8.1 clusters: keep, note changed — the old note warned "a transient
+#     failure can hide that region's clusters". Under narrow semantics transient
+#     failures (timeout, 5xx) are ERROR, not empty, so the concern does not materialize.
+#     The note was rewritten to say that empty covers SERVICE_DISABLED, NOT_FOUND and
+#     FAILED_PRECONDITION, and other errors produce ERROR.
+# 13. cis-gke-4.5.1 binauthz_policy: keep — notes say "on_error: empty treats a
+#     disabled Binary Authorization API as the default allow-all policy";
+#     SERVICE_DISABLED → empty → treated as default allow-all.
+# 14. cis-gke-5.1.3 binauthz_policy: keep — notes say "If the policy cannot be read
+#     (for example the API is disabled), on_error: empty leaves only check (1)";
+#     SERVICE_DISABLED → empty → check(1) only, with type() guard.
+# 15. cis-gke-5.6.7 managed_certs: keep — notes say "on_error: empty so a missing CRD
+#     reads as 'no certificates'"; NOT_FOUND → empty → no certs.
+# 16. cis-gke-5.7.2 cos_auditd_ds: keep — notes say "on_error: empty turns a failed
+#     lookup into 'not found'"; NOT_FOUND → empty → not found.
+#
+# 18 new steps added by this revision (17–34): cis-gcp-2.3 sinks, 2.5–2.12 metrics and
+# alert_policies, 2.15 logs — all added to prevent the rule from becoming NOT_APPLICABLE
+# when the required API is disabled.
+on_error_empty_steps:
+  - {rule: cis-gcp-1.1.4, step: effective_policies}
+  - {rule: cis-gcp-1.2,   step: domain_restriction}
+  - {rule: cis-gcp-1.2,   step: directory_users}
+  - {rule: cis-gcp-2.3,   step: sinks}
+  - {rule: cis-gcp-2.4,   step: buckets}
+  - {rule: cis-gcp-2.5,   step: metrics}
+  - {rule: cis-gcp-2.5,   step: alert_policies}
+  - {rule: cis-gcp-2.6,   step: metrics}
+  - {rule: cis-gcp-2.6,   step: alert_policies}
+  - {rule: cis-gcp-2.7,   step: metrics}
+  - {rule: cis-gcp-2.7,   step: alert_policies}
+  - {rule: cis-gcp-2.8,   step: metrics}
+  - {rule: cis-gcp-2.8,   step: alert_policies}
+  - {rule: cis-gcp-2.9,   step: metrics}
+  - {rule: cis-gcp-2.9,   step: alert_policies}
+  - {rule: cis-gcp-2.10,  step: metrics}
+  - {rule: cis-gcp-2.10,  step: alert_policies}
+  - {rule: cis-gcp-2.11,  step: metrics}
+  - {rule: cis-gcp-2.11,  step: alert_policies}
+  - {rule: cis-gcp-2.12,  step: metrics}
+  - {rule: cis-gcp-2.12,  step: alert_policies}
+  - {rule: cis-gcp-2.13,  step: dns_policies}
+  - {rule: cis-gcp-2.15,  step: logs}
+  - {rule: cis-gcp-2.16,  step: settings}
+  - {rule: cis-gcp-3.8,   step: policies}
+  - {rule: cis-gcp-4.4,   step: oslogin_policy}
+  - {rule: cis-gcp-4.10,  step: versions}
+  - {rule: cis-gcp-4.12,  step: inventories}
+  - {rule: cis-gcp-7.4,   step: discovery_configs}
+  - {rule: cis-gcp-8.1,   step: clusters}
+  - {rule: cis-gke-4.5.1, step: binauthz_policy}
+  - {rule: cis-gke-5.1.3, step: binauthz_policy}
+  - {rule: cis-gke-5.6.7, step: managed_certs}
+  - {rule: cis-gke-5.7.2, step: cos_auditd_ds}

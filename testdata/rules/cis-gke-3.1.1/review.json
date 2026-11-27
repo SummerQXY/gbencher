@@ -1,0 +1,42 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-prod",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "cluster": {
+    "name": "example-cluster",
+    "autopilot": {
+      "enabled": false
+    }
+  },
+  "data": {
+    "nodes": {
+      "items": [
+        {
+          "metadata": {
+            "name": "example-node"
+          },
+          "status": {
+            "nodeInfo": {
+              "osImage": "Example Linux image"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-3.1.1",
+      "resource_key": "example-node",
+      "status": "REVIEW"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "nodes": "handwritten"
+    }
+  }
+}

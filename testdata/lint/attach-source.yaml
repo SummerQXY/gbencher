@@ -1,0 +1,35 @@
+# Lint fixture: the only defect is a foreach source that builds new objects (the map macro and a
+# map literal). A step that attaches its result needs the original elements, not copies.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-attach-source-1
+    ref: "1.1"
+    title: Fixture with an attach source that builds objects
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [iam.googleapis.com]
+    collect:
+      - id: service_accounts
+        gcloud: iam service-accounts list --project={{ .project }} --format=json
+      - id: user_keys
+        foreach: 'data.service_accounts.map(sa, {"email": sa.email})'
+        as: sa
+        attach: user_keys
+        gcloud: iam service-accounts keys list --iam-account={{ .sa.email }} --managed-by=user --format=json
+    resource:
+      from: data.service_accounts
+      kind: iam.googleapis.com/ServiceAccount
+      name: r.email
+    check:
+      assert: size(r.?user_keys.orValue([])) == 0
+      message: "Service account {{ .r.email }} has user-managed keys"
+    remediation: Delete the keys.
+    notes: Fixture for the lint tests.

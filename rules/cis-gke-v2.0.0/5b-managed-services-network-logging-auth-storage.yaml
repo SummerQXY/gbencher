@@ -1,0 +1,813 @@
+dsl_version: 1
+benchmark:
+  id: cis-gke
+  version: "2.0.0"
+  section: "5"
+  title: Managed services (5.6 networking, 5.7 logging, 5.8 authentication, 5.9 storage, 5.10 additional)
+# GKE rule design convention: scope: cluster means the engine enumerates clusters and injects the current cluster JSON into ctx.cluster and implicit data.cluster; rules must not repeat a cluster-level collect.
+rules:
+  - id: cis-gke-5.6.1
+    ref: "5.6.1"
+    title: Enable VPC Flow Logs and Intranode Visibility
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com, compute.googleapis.com]
+    collect:
+      - id: subnet
+        gcloud: compute networks subnets describe {{ .cluster.networkConfig.subnetwork }} --project={{ .project }} --format=json
+        cross_project: true
+    check:
+      assert: |
+        ctx.cluster.?networkConfig.?enableIntraNodeVisibility.orValue(false)
+        && (data.subnet.?logConfig.?enable.orValue(false) || data.subnet.?enableFlowLogs.orValue(false))
+      message: "Intranode visibility is disabled on the cluster, or VPC Flow Logs are disabled on the cluster subnet"
+    evidence:
+      - 'ctx.cluster.?networkConfig.?enableIntraNodeVisibility.orValue(false)'
+      - 'ctx.cluster.?networkConfig.?subnetwork.orValue("")'
+      - 'data.subnet.?logConfig.orValue({})'
+      - 'data.subnet.?enableFlowLogs.orValue(false)'
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT> --enable-intra-node-visibility
+      gcloud compute networks subnets update <SUBNET> --region=<REGION> --project=<SUBNET_PROJECT> --enable-flow-logs
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/intranode-visibility
+      - https://docs.cloud.google.com/vpc/docs/using-flow-logs
+    notes: |
+      Automates both CIS audit steps. Intranode visibility is read from
+      ctx.cluster.networkConfig.enableIntraNodeVisibility (REST spelling, capital N). The cluster subnet is
+      described by its relative resource name (networkConfig.subnetwork) instead of a name-filtered list:
+      auto-mode networks have a same-named "default" subnet in every region, and Shared VPC subnets live in
+      the host project. gcloud takes the project and region from the resource name; --project is only a
+      default. Flow logs count as enabled when logConfig.enable or the legacy enableFlowLogs flag is true;
+      both default to off, so absence fails. Flow-log tuning (aggregation, sampling, metadata, filters) is
+      not judged. Limitations: flow logs configured only through Network Management VpcFlowLogsConfig
+      resources are not detected; extra node-pool subnets of multi-subnet clusters are not checked; for
+      Shared VPC the scanner needs compute.subnetworks.get on the host project, otherwise the rule is
+      SKIPPED. Autopilot clusters are evaluated the same way; exempt a cluster where intranode visibility
+      cannot be enabled.
+
+  - id: cis-gke-5.6.2
+    ref: "5.6.2"
+    title: Use VPC native GKE clusters with alias IP address ranges
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    check:
+      assert: ctx.cluster.?ipAllocationPolicy.?useIpAliases.orValue(false)
+      message: "Cluster is routes-based: ipAllocationPolicy.useIpAliases is not true"
+    evidence:
+      - 'ctx.cluster.?ipAllocationPolicy.?useIpAliases.orValue(false)'
+      - 'ctx.cluster.?ipAllocationPolicy.?clusterIpv4Cidr.orValue("")'
+      - 'ctx.cluster.?ipAllocationPolicy.?servicesIpv4Cidr.orValue("")'
+    remediation: |
+      VPC-native mode is fixed at creation. Create a replacement cluster, migrate workloads, then delete the routes-based cluster:
+      gcloud container clusters create <CLUSTER> --location=<LOCATION> --project=<PROJECT> --enable-ip-alias
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/alias-ips
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/alias-ips
+    notes: |
+      Mirrors the CIS audit: ipAllocationPolicy.useIpAliases must be true. New clusters, including every
+      Autopilot cluster, are VPC-native by default and report useIpAliases=true, so a missing value is
+      treated as routes-based and fails. There is no in-place remediation; the finding persists until the
+      cluster is replaced.
+
+  - id: cis-gke-5.6.3
+    ref: "5.6.3"
+    title: Restrict GKE control plane access with authorized networks
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: cluster
+    services: [container.googleapis.com]
+    params:
+      allow_gcp_public_cidrs: false
+      approved_cidrs: []
+    check:
+      assert: |
+        ctx.cluster.?privateClusterConfig.?enablePrivateEndpoint.orValue(false)
+        || !ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.?enabled.orValue(true)
+        || !ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.?enablePublicEndpoint.orValue(true)
+        || [
+             ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.?authorizedNetworksConfig.orValue({}),
+             ctx.cluster.?masterAuthorizedNetworksConfig.orValue({})
+           ].exists(an,
+             an.?enabled.orValue(false)
+             && size(an.?cidrBlocks.orValue([])) > 0
+             && an.cidrBlocks.all(blk,
+                  !cidrIsPublic(blk.?cidrBlock.orValue("0.0.0.0/0"))
+                  && (size(params.approved_cidrs) == 0 || blk.?cidrBlock.orValue("") in params.approved_cidrs))
+             && (params.allow_gcp_public_cidrs || !an.?gcpPublicCidrsAccessEnabled.orValue(false)))
+      message: "Control plane public IP endpoint is not restricted by authorized networks (disabled, no CIDR blocks, a 0.0.0.0/0-style or unapproved block, or Google Cloud public IP access enabled)"
+    evidence:
+      - 'ctx.cluster.?masterAuthorizedNetworksConfig.orValue({})'
+      - 'ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.orValue({})'
+      - 'ctx.cluster.?privateClusterConfig.?enablePrivateEndpoint.orValue(false)'
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT> --enable-master-authorized-networks --master-authorized-networks=<CIDR1>,<CIDR2>
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT> --no-enable-google-cloud-access
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/network-isolation
+      - https://docs.cloud.google.com/kubernetes-engine/docs/reference/rest/v1/projects.locations.clusters
+    notes: |
+      Passes outright when the cluster has no public IP endpoint (privateClusterConfig.enablePrivateEndpoint,
+      ipEndpointsConfig.enabled=false, or ipEndpointsConfig.enablePublicEndpoint=false): authorized networks
+      only gate the IP endpoint, and 5.6.4 is then satisfied. Otherwise authorized networks must be enabled
+      with at least one CIDR block, no block may be 0.0.0.0/0-style (cidrIsPublic), and
+      gcpPublicCidrsAccessEnabled must not be true unless allow_gcp_public_cidrs=true. Both the legacy
+      masterAuthorizedNetworksConfig and controlPlaneEndpointsConfig.ipEndpointsConfig.authorizedNetworksConfig
+      are read because the API mirrors them; either one satisfying the check passes. The CIS judgement "only
+      approved ranges" is optional: list exact blocks in approved_cidrs to fail any other block (empty means
+      not enforced). Broad ranges with a non-zero prefix (for example 0.0.0.0/1) are only caught through
+      approved_cidrs. Absent endpoint flags are treated as "public endpoint enabled" (conservative).
+
+  - id: cis-gke-5.6.4
+    ref: "5.6.4"
+    title: Use DNS based access or private GKE control plane endpoints
+    profile: L2
+    cis_assessment: automated
+    mode: contextual
+    severity: high
+    scope: cluster
+    services: [container.googleapis.com]
+    params:
+      accept_restricted_public_endpoint: false
+    check:
+      assert: |
+        ctx.cluster.?privateClusterConfig.?enablePrivateEndpoint.orValue(false)
+        || !ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.?enabled.orValue(true)
+        || !ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.?enablePublicEndpoint.orValue(true)
+        || [
+             ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.?authorizedNetworksConfig.orValue({}),
+             ctx.cluster.?masterAuthorizedNetworksConfig.orValue({})
+           ].exists(an,
+             an.?enabled.orValue(false)
+             && size(an.?cidrBlocks.orValue([])) > 0
+             && an.cidrBlocks.all(blk, !cidrIsPublic(blk.?cidrBlock.orValue("0.0.0.0/0"))))
+      review_when: |
+        !params.accept_restricted_public_endpoint
+        && !ctx.cluster.?privateClusterConfig.?enablePrivateEndpoint.orValue(false)
+        && ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.?enabled.orValue(true)
+        && ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.?enablePublicEndpoint.orValue(true)
+      message: "Control plane public IP endpoint is enabled and broadly reachable (no authorized networks, no CIDR blocks, or a 0.0.0.0/0-style block)"
+      review_message: "Control plane public IP endpoint is enabled but restricted by authorized networks; confirm it is required or move to DNS-based access or the private endpoint (set accept_restricted_public_endpoint=true to accept this design)"
+    evidence:
+      - 'ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.?enabled.orValue(null)'
+      - 'ctx.cluster.?controlPlaneEndpointsConfig.?ipEndpointsConfig.?enablePublicEndpoint.orValue(null)'
+      - 'ctx.cluster.?controlPlaneEndpointsConfig.?dnsEndpointConfig.orValue({})'
+      - 'ctx.cluster.?privateClusterConfig.?enablePrivateEndpoint.orValue(false)'
+      - 'ctx.cluster.?masterAuthorizedNetworksConfig.orValue({})'
+    remediation: |
+      DNS-based access only: gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT> --enable-dns-access --no-enable-ip-access
+      or private IP endpoint: gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT> --enable-ip-access --enable-private-endpoint
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/network-isolation
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/networking
+    notes: |
+      Passes when there is no public IP endpoint: the legacy private endpoint flag, IP access disabled
+      (DNS-based endpoint only), or ipEndpointsConfig.enablePublicEndpoint=false. A public endpoint without
+      authorized networks, or with an empty or 0.0.0.0/0-style CIDR list, fails as broadly reachable. CIS
+      tolerates a public endpoint restricted by authorized networks only as a fallback, which is an
+      organizational decision, so that case is REVIEW; set accept_restricted_public_endpoint=true where the
+      design is approved. DNS endpoint settings (allowExternalTraffic, token and certificate access) are
+      evidence only, since DNS access is IAM-gated. Google Cloud public CIDR access and approved ranges are
+      judged by 5.6.3. Absent endpoint flags are treated as public (conservative).
+
+  - id: cis-gke-5.6.5
+    ref: "5.6.5"
+    title: Ensure private GKE nodes are configured without external IP addresses
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    check:
+      assert: |
+        (ctx.cluster.?privateClusterConfig.?enablePrivateNodes.orValue(false)
+         || ctx.cluster.?networkConfig.?defaultEnablePrivateNodes.orValue(false))
+        && r.?networkConfig.?enablePrivateNodes.orValue(true)
+      message: "Node pool {{ .r.name }} can get external IP addresses: the pool disables private nodes, or the cluster does not default node pools to private nodes"
+    evidence:
+      - 'ctx.cluster.?privateClusterConfig.?enablePrivateNodes.orValue(false)'
+      - 'ctx.cluster.?networkConfig.?defaultEnablePrivateNodes.orValue(false)'
+      - 'r.?networkConfig.?enablePrivateNodes.orValue(null)'
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT> --enable-private-nodes
+      gcloud container node-pools update <POOL> --cluster=<CLUSTER> --location=<LOCATION> --project=<PROJECT> --enable-private-nodes
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/network-isolation
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/private-clusters
+    notes: |
+      One result per node pool. The cluster default must be private (legacy
+      privateClusterConfig.enablePrivateNodes or networkConfig.defaultEnablePrivateNodes), and the pool must
+      not override it: nodePools[].networkConfig.enablePrivateNodes is honoured when set, and an unset value
+      inherits the cluster default as the API documents. A pool that is explicitly private in a cluster whose
+      default is public still fails, because CIS also requires the cluster default (new pools would
+      otherwise get external IPs). The default is non-compliant, so absence fails. Node VM interfaces are
+      not inspected; the pool configuration decides whether external IPs are assigned.
+
+  - id: cis-gke-5.6.6
+    ref: "5.6.6"
+    title: Apply least privilege firewall rules to GKE worker nodes
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: cluster
+    services: [container.googleapis.com, compute.googleapis.com]
+    collect:
+      - id: effective_firewalls
+        # Reads effective network firewall rules; resource.from/filter/assert are compatible with API and gcloud JSON container and field naming.
+        gcloud: compute networks get-effective-firewalls {{ .cluster.networkConfig.network }} --project={{ .project }} --format=json
+        cross_project: true
+    resource:
+      from: data.effective_firewalls.?firewalls.orValue(data.effective_firewalls.?items.orValue([]))
+      filter: |
+        r.?direction.orValue(r.?direction_enum.orValue("INGRESS")) == "INGRESS"
+        && !r.?disabled.orValue(false)
+        && size(r.?allowed.orValue([])) > 0
+        && (
+          (size(r.?targetTags.orValue(r.?target_tags.orValue([]))) == 0
+            && size(r.?targetServiceAccounts.orValue(r.?target_svc_acct.orValue([]))) == 0)
+          || r.?targetTags.orValue(r.?target_tags.orValue([])).exists(t,
+               t.startsWith("gke-" + ctx.cluster.name + "-")
+               || ctx.cluster.?nodePools.orValue([]).exists(p, t in p.?config.?tags.orValue([])))
+          || r.?targetServiceAccounts.orValue(r.?target_svc_acct.orValue([])).exists(sa,
+               ctx.cluster.?nodePools.orValue([]).exists(p,
+                 sa == (p.?config.?serviceAccount.orValue("default") == "default"
+                        ? ctx.project_number + "-compute@developer.gserviceaccount.com"
+                        : p.config.serviceAccount)))
+        )
+      kind: compute.googleapis.com/Firewall
+      name: r.?name.orValue(r.?rule_name.orValue("unknown-firewall"))
+      empty: pass
+    params:
+      allowed_public_ports: []
+      ignore_gke_managed_rules: true
+      review_untargeted_rules: true
+    check:
+      assert: |
+        (params.ignore_gke_managed_rules && r.?name.orValue(r.?rule_name.orValue("")).startsWith("gke-" + ctx.cluster.name + "-"))
+        || !r.?sourceRanges.orValue(r.?source_ranges.orValue(r.?ip_ranges.orValue([]))).exists(s, cidrIsPublic(s))
+        || r.?allowed.orValue([]).all(a,
+             a.?IPProtocol.orValue(a.?ip_protocol.orValue("")).lowerAscii() in ["tcp", "udp"]
+             && size(a.?ports.orValue([])) > 0
+             && a.ports.all(p, p in params.allowed_public_ports.map(x, string(x))))
+      review_when: |
+        params.review_untargeted_rules
+        && size(r.?targetTags.orValue(r.?target_tags.orValue([]))) == 0
+        && size(r.?targetServiceAccounts.orValue(r.?target_svc_acct.orValue([]))) == 0
+      message: "Firewall rule {{ .r.name }} allows {{ .r.allowed }} from {{ .r.sourceRanges }} to this cluster's nodes beyond allowed_public_ports {{ .params.allowed_public_ports }}"
+      review_message: "Firewall rule {{ .r.name }} has no target tags or service accounts, so it applies to every instance in the network including this cluster's nodes; confirm its sources, protocols and ports are required"
+    evidence:
+      - 'r.?sourceRanges.orValue(r.?source_ranges.orValue(r.?ip_ranges.orValue([])))'
+      - 'r.?allowed.orValue([])'
+      - 'r.?targetTags.orValue(r.?target_tags.orValue([]))'
+      - 'r.?targetServiceAccounts.orValue(r.?target_svc_acct.orValue([]))'
+      - 'r.?priority.orValue(1000)'
+    remediation: |
+      gcloud compute firewall-rules update <RULE> --project=<NETWORK_PROJECT> --source-ranges=<TRUSTED_CIDRS> --target-tags=<NODE_TAG>
+      or delete it: gcloud compute firewall-rules delete <RULE> --project=<NETWORK_PROJECT>
+      For LoadBalancer Services, restrict spec.loadBalancerSourceRanges instead of editing k8s-fw-* rules.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/firewall-rules
+      - https://docs.cloud.google.com/vpc/docs/firewalls
+    notes: |
+      Approximates the CIS manual review for ingress traffic. Uses gcloud compute networks
+      get-effective-firewalls on the cluster network (networkConfig.network) with cross_project: true,
+      so host-project rules are included for Shared VPC. Population: enabled INGRESS allow rules that
+      reach this cluster's nodes, meaning rules with no target tags or service accounts (they apply to
+      every instance), rules targeting a node pool tag or the GKE node tag prefix gke-<cluster>-, and
+      rules targeting a node pool service account ("default" maps to the Compute Engine default service
+      account). FAIL: a 0.0.0.0/0 or ::/0 source combined with a protocol other than tcp/udp, no port
+      list, or ports outside allowed_public_ports (exact strings; list ranges verbatim). GKE-created
+      gke-<cluster>-* rules are accepted by name while ignore_gke_managed_rules=true. Service and
+      Ingress rules (k8s-fw-*) are evaluated, so add the ports of approved public LoadBalancer Services
+      to allowed_public_ports or exempt the rule. REVIEW: rules without targets, which CIS asks to
+      review; set review_untargeted_rules=false to silence. Limitations: hierarchical and network
+      firewall policies, priority and deny shadowing, and egress are not evaluated; the tag prefix can
+      also match a cluster whose name extends this one (prod and prod-eu); Shared VPC needs
+      compute.networks.getEffectiveFirewalls on the host project, otherwise the rule is SKIPPED.
+
+  - id: cis-gke-5.6.7
+    ref: "5.6.7"
+    title: Use Google managed SSL certificates for GKE Ingress TLS
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: cluster
+    services: [container.googleapis.com]
+    requires: [kubectl]
+    collect:
+      - id: ingresses
+        kubectl: get ingresses --all-namespaces -o json
+      - id: managed_certs
+        kubectl: get managedcertificates.networking.gke.io --all-namespaces -o json
+        on_error: empty
+    resource:
+      from: data.ingresses.?items.orValue([])
+      filter: |
+        (
+          size(r.?spec.?tls.orValue([])) > 0
+          || "networking.gke.io/managed-certificates" in r.metadata.?annotations.orValue({})
+          || "ingress.gcp.kubernetes.io/pre-shared-cert" in r.metadata.?annotations.orValue({})
+        )
+        && (
+          "kubernetes.io/ingress.class" in r.metadata.?annotations.orValue({})
+            ? r.metadata.annotations["kubernetes.io/ingress.class"] in params.ingress_classes
+            : r.?spec.?ingressClassName.orValue("gce") in params.ingress_classes
+        )
+      kind: networking.k8s.io/Ingress
+      name: r.metadata.namespace + "/" + r.metadata.name
+    params:
+      ingress_classes: [gce]
+      accept_pre_shared_cert: false
+    check:
+      assert: |
+        !(
+          "networking.gke.io/managed-certificates" in r.metadata.?annotations.orValue({})
+          && r.metadata.annotations["networking.gke.io/managed-certificates"].trim() != ""
+        )
+        || r.metadata.annotations["networking.gke.io/managed-certificates"].split(",")
+             .map(n, n.trim()).filter(n, n != "")
+             .all(n, ("items" in data.managed_certs ? data.managed_certs.items : []).exists(c,
+               c.metadata.namespace == r.metadata.namespace && c.metadata.name == n))
+      review_when: |
+        (
+          "networking.gke.io/managed-certificates" in r.metadata.?annotations.orValue({})
+          && r.metadata.annotations["networking.gke.io/managed-certificates"].trim() != ""
+        )
+          ? r.metadata.annotations["networking.gke.io/managed-certificates"].split(",")
+              .map(n, n.trim()).filter(n, n != "")
+              .exists(n, ("items" in data.managed_certs ? data.managed_certs.items : []).exists(c,
+                c.metadata.namespace == r.metadata.namespace && c.metadata.name == n
+                && c.?status.?certificateStatus.orValue("").lowerAscii() != "active"))
+          : !(
+              params.accept_pre_shared_cert
+              && "ingress.gcp.kubernetes.io/pre-shared-cert" in r.metadata.?annotations.orValue({})
+              && r.metadata.annotations["ingress.gcp.kubernetes.io/pre-shared-cert"].trim() != ""
+            )
+      message: "Ingress {{ .r.metadata.namespace }}/{{ .r.metadata.name }} references a ManagedCertificate that does not exist in its namespace"
+      review_message: "Ingress {{ .r.metadata.namespace }}/{{ .r.metadata.name }} terminates TLS with a self-managed Secret or pre-shared certificate, or its ManagedCertificate is not Active; confirm a Google-managed certificate cannot be used (wildcard or more than 100 domains) or wait for provisioning"
+    evidence:
+      - 'r.metadata.?annotations.orValue({}).filter(k, k.startsWith("networking.gke.io/") || k.startsWith("ingress.gcp.kubernetes.io/") || k == "kubernetes.io/ingress.class").map(k, k + "=" + r.metadata.annotations[k])'
+      - 'r.?spec.?tls.orValue([]).map(t, t.?secretName.orValue(""))'
+      - '("items" in data.managed_certs ? data.managed_certs.items : []).filter(c, c.metadata.namespace == r.metadata.namespace).map(c, c.metadata.name + ":" + c.?status.?certificateStatus.orValue("unknown"))'
+    remediation: |
+      Create a ManagedCertificate (apiVersion networking.gke.io/v1, spec.domains: [<DOMAIN>]) in the Ingress namespace with kubectl apply -f <FILE>, then reference it:
+      kubectl annotate ingress <INGRESS> -n <NAMESPACE> networking.gke.io/managed-certificates=<CERT_NAME> --overwrite
+      Point the domain DNS records at the load balancer IP so the certificate can become Active.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/managed-certs
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/ingress
+    notes: |
+      Requires kubectl. Population: GKE external Ingresses (class from the kubernetes.io/ingress.class
+      annotation, else spec.ingressClassName, else the GKE default gce; filtered by ingress_classes) that
+      configure TLS through spec.tls, networking.gke.io/managed-certificates or
+      ingress.gcp.kubernetes.io/pre-shared-cert. FAIL: the managed-certificates annotation names a
+      ManagedCertificate that does not exist in the Ingress namespace. REVIEW: a referenced certificate is
+      not Active (provisioning may still be in progress), a pre-shared certificate is used (PASS when
+      accept_pre_shared_cert=true), or TLS relies only on self-managed Secrets (spec.tls[].secretName), which
+      CIS accepts where managed certificates do not fit (wildcards, more than 100 domains). gce-internal is
+      excluded by default because Google-managed certificates are not supported on internal Ingress.
+      Ingresses without any TLS, certificate domain coverage of the Ingress hosts, and LoadBalancer Services
+      are not evaluated. The ManagedCertificate list uses on_error: empty so a missing CRD reads as "no
+      certificates"; its items are read with an "items" in check because an empty step result may be {} or [].
+
+  - id: cis-gke-5.7.1
+    ref: "5.7.1"
+    title: Enable Cloud Logging and Cloud Monitoring for GKE clusters
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    params:
+      required_logging_components: [SYSTEM_COMPONENTS, WORKLOADS]
+      required_monitoring_components: [SYSTEM_COMPONENTS]
+      require_managed_prometheus: false
+    check:
+      assert: |
+        params.required_logging_components.all(c,
+          c in ctx.cluster.?loggingConfig.?componentConfig.?enableComponents.orValue([]))
+        && params.required_monitoring_components.all(c,
+          c in ctx.cluster.?monitoringConfig.?componentConfig.?enableComponents.orValue([]))
+        && (!params.require_managed_prometheus
+            || ctx.cluster.?monitoringConfig.?managedPrometheusConfig.?enabled.orValue(false))
+      message: "Cloud Logging components {{ .params.required_logging_components }} or Cloud Monitoring components {{ .params.required_monitoring_components }} are not all enabled (or Managed Service for Prometheus is required and disabled)"
+    evidence:
+      - 'ctx.cluster.?loggingConfig.?componentConfig.?enableComponents.orValue([])'
+      - 'ctx.cluster.?monitoringConfig.?componentConfig.?enableComponents.orValue([])'
+      - 'ctx.cluster.?monitoringConfig.?managedPrometheusConfig.?enabled.orValue(false)'
+      - 'ctx.cluster.?loggingService.orValue("")'
+      - 'ctx.cluster.?monitoringService.orValue("")'
+    remediation: gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT> --logging=SYSTEM,WORKLOAD --monitoring=SYSTEM
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/observability
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/about-logs
+    notes: |
+      Mirrors the CIS audit on the component-based configuration:
+      loggingConfig.componentConfig.enableComponents must contain required_logging_components (default
+      SYSTEM_COMPONENTS and WORKLOADS) and monitoringConfig.componentConfig.enableComponents must contain
+      required_monitoring_components (default SYSTEM_COMPONENTS). Missing or empty lists fail, as CIS
+      requires; GKE enables these by default. Remove WORKLOADS from required_logging_components where
+      workload logging is intentionally excluded (CIS allows this), or set require_managed_prometheus=true to
+      also require Managed Service for Prometheus. The legacy loggingService and monitoringService values
+      are evidence only.
+
+  - id: cis-gke-5.7.2
+    ref: "5.7.2"
+    title: Enable Linux auditd logging for Container Optimized OS GKE nodes
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    requires: [kubectl]
+    collect:
+      - id: cos_auditd_ds
+        kubectl: get daemonsets --namespace={{ .params.namespace }} -o json
+        on_error: empty
+    resource:
+      from: "[ctx.cluster]"
+      filter: |
+        !ctx.cluster.?autopilot.?enabled.orValue(false)
+        && ctx.cluster.?nodePools.orValue([]).exists(p,
+             p.?config.?imageType.orValue("COS_CONTAINERD").upperAscii().startsWith("COS"))
+      kind: container.googleapis.com/Cluster
+      name: r.name
+    params:
+      daemonset_name: cos-auditd-logging
+      namespace: cos-auditd
+    params_constraints:
+      namespace:
+        pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        max_length: 63
+    check:
+      assert: |
+        ("items" in data.cos_auditd_ds ? data.cos_auditd_ds.items : []).exists(d, d.metadata.name == params.daemonset_name)
+      review_when: |
+        ("items" in data.cos_auditd_ds ? data.cos_auditd_ds.items : []).exists(d,
+          d.metadata.name == params.daemonset_name
+          && (d.?status.?desiredNumberScheduled.orValue(0) == 0
+              || d.?status.?numberAvailable.orValue(0) < d.?status.?desiredNumberScheduled.orValue(0)))
+      message: "No DaemonSet {{ .params.namespace }}/{{ .params.daemonset_name }} found; Linux auditd logs are not collected from Container-Optimized OS nodes"
+      review_message: "DaemonSet {{ .params.namespace }}/{{ .params.daemonset_name }} exists but schedules no Pods or has fewer available Pods than desired; confirm auditd logging runs on every Container-Optimized OS node"
+    evidence:
+      - '("items" in data.cos_auditd_ds ? data.cos_auditd_ds.items : []).map(d, d.metadata.name)'
+      - '("items" in data.cos_auditd_ds ? data.cos_auditd_ds.items : []).filter(d, d.metadata.name == params.daemonset_name).map(d, d.?status.orValue({}))'
+      - 'ctx.cluster.?nodePools.orValue([]).map(p, p.name + ":" + p.?config.?imageType.orValue("COS_CONTAINERD"))'
+    remediation: |
+      Review the example manifest cos-auditd-logging.yaml from GoogleCloudPlatform/k8s-node-tools (os-audit): pin an approved logging image, tune the audit and fluent-bit configuration, then deploy it:
+      kubectl apply -f cos-auditd-logging.yaml
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/linux-auditd-logging
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/about-logs
+    notes: |
+      Approximates the CIS manual audit (find an auditd DaemonSet with available Pods). The cluster itself is
+      the one-element population so the rule is NOT_APPLICABLE where it does not apply: Autopilot clusters
+      (privileged node DaemonSets are not allowed) and clusters without a Container-Optimized OS node pool
+      (imageType not starting with COS; an unset imageType means the COS_CONTAINERD default). FAIL: no
+      DaemonSet named daemonset_name in namespace; the defaults follow the upstream cos-auditd-logging
+      example manifest, so tune both to the approved deployment. REVIEW: the DaemonSet exists but schedules
+      no Pods or has fewer available Pods than desired. Not checked: audit rule content, the log
+      destination, and whether the DaemonSet node selector covers every COS pool. on_error: empty turns a
+      failed lookup into "not found" (permission errors still SKIP); items are read with an "items" in check
+      because an empty step result may be {} or [].
+
+  - id: cis-gke-5.8.1
+    ref: "5.8.1"
+    title: Disable legacy client certificate authentication for the GKE API server
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: cluster
+    services: [container.googleapis.com]
+    check:
+      assert: |
+        !ctx.cluster.?masterAuth.?clientCertificateConfig.?issueClientCertificate.orValue(false)
+        && ctx.cluster.?masterAuth.?clientCertificate.orValue("") == ""
+        && ctx.cluster.?masterAuth.?clientKey.orValue("") == ""
+      message: "A legacy client certificate is issued for the cluster (masterAuth.clientCertificate or clientKey present, or issueClientCertificate=true)"
+    evidence:
+      - 'ctx.cluster.?masterAuth.?clientCertificateConfig.?issueClientCertificate.orValue(false)'
+      - 'ctx.cluster.?masterAuth.?clientCertificate.orValue("") != ""'
+      - 'ctx.cluster.?masterAuth.?clientKey.orValue("") != ""'
+    remediation: |
+      New clusters: gcloud container clusters create <CLUSTER> --location=<LOCATION> --project=<PROJECT> --no-issue-client-certificate
+      An issued certificate cannot be removed in place: create a replacement cluster with --no-issue-client-certificate, migrate workloads and delete the old cluster; until then make sure the certificate identity has no RBAC permissions.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/api-server-authentication
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/credential-rotation
+    notes: |
+      Mirrors the CIS audit: masterAuth.clientCertificate and masterAuth.clientKey must be absent or empty,
+      and clientCertificateConfig.issueClientCertificate must not be true. Evidence records booleans only,
+      so the certificate and key are never copied into the report. New clusters are compliant by default.
+      There is no in-place fix; while a replacement is planned, confirm the certificate identity has no RBAC
+      bindings and record an exemption with an expiry date.
+
+  - id: cis-gke-5.8.2
+    ref: "5.8.2"
+    title: Use Google Groups to centrally manage Kubernetes RBAC access for GKE clusters
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: cluster
+    services: [container.googleapis.com]
+    collect:
+      - id: crb
+        kubectl: get clusterrolebindings -o json
+        requires: [kubectl]
+      - id: rb
+        kubectl: get rolebindings --all-namespaces -o json
+        requires: [kubectl]
+    params:
+      security_group_pattern: '^gke-security-groups@'
+      allowed_user_subjects: []
+    check:
+      assert: |
+        ctx.cluster.?authenticatorGroupsConfig.?enabled.orValue(false)
+        && ctx.cluster.?authenticatorGroupsConfig.?securityGroup.orValue("").matches(params.security_group_pattern)
+      review_when: |
+        (
+          ctx.organization_domain != ""
+          && !ctx.cluster.?authenticatorGroupsConfig.?securityGroup.orValue("").lowerAscii()
+                .endsWith("@" + ctx.organization_domain.lowerAscii())
+        )
+        || (
+          has(data.crb) && has(data.rb)
+          && (data.crb.?items.orValue([]) + data.rb.?items.orValue([])).exists(b,
+               b.?subjects.orValue([]).exists(s,
+                 s.kind == "User"
+                 && s.name.contains("@")
+                 && !s.name.endsWith(".gserviceaccount.com")
+                 && !(s.name in params.allowed_user_subjects)))
+        )
+      message: "Google Groups for RBAC is disabled, or authenticatorGroupsConfig.securityGroup does not match {{ .params.security_group_pattern }}"
+      review_message: "Google Groups for RBAC is enabled, but RBAC bindings grant roles directly to individual users or the security group domain differs from the organization domain; move access to Google Groups or document the exceptions in allowed_user_subjects"
+    evidence:
+      - 'ctx.cluster.?authenticatorGroupsConfig.orValue({})'
+      - 'has(data.crb) && has(data.rb) ? (data.crb.?items.orValue([]) + data.rb.?items.orValue([])).filter(b, b.?subjects.orValue([]).exists(s, s.kind == "User" && s.name.contains("@") && !s.name.endsWith(".gserviceaccount.com"))).map(b, b.?metadata.?namespace.orValue("cluster") + "/" + b.metadata.name) : []'
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT> --security-group=gke-security-groups@<DOMAIN>
+      Then replace User subjects in RoleBindings and ClusterRoleBindings with Group subjects nested under gke-security-groups@<DOMAIN>.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/google-groups-rbac
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+    notes: |
+      FAIL when Google Groups for RBAC is disabled or securityGroup does not match security_group_pattern
+      (default ^gke-security-groups@; set ^gke-security-groups@example\.com$ to pin the domain). REVIEW
+      covers the rest of the CIS manual audit: the security group domain differs from the organization domain
+      (ctx.organization_domain, when resolvable), or RoleBindings/ClusterRoleBindings grant roles directly to
+      individual users (User subjects with an email that is not a *.gserviceaccount.com identity and is not
+      listed in allowed_user_subjects). The binding check runs only when kubectl is enabled (step-level
+      requires); without it only the cluster setting is judged. Nesting of member groups under
+      gke-security-groups is not verifiable without Cloud Identity access.
+
+  - id: cis-gke-5.8.3
+    ref: "5.8.3"
+    title: Ensure Legacy Authorization (ABAC) is Disabled
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: cluster
+    services: [container.googleapis.com]
+    check:
+      assert: "!ctx.cluster.?legacyAbac.?enabled.orValue(false)"
+      message: "Legacy ABAC authorization is enabled"
+    evidence:
+      - 'ctx.cluster.?legacyAbac.?enabled.orValue(false)'
+    remediation: gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT> --no-enable-legacy-authorization
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
+    notes: |
+      Mirrors the CIS audit: legacyAbac.enabled must be false or absent. ABAC is disabled by default, so
+      absence passes. Migrate required access to RBAC before disabling ABAC.
+
+  - id: cis-gke-5.9.1
+    ref: "5.9.1"
+    title: Use CMEK protected StorageClasses for GKE Persistent Disk volumes
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: cluster
+    services: [container.googleapis.com]
+    requires: [kubectl]
+    collect:
+      - id: storage_classes
+        kubectl: get storageclasses -o json
+    resource:
+      from: data.storage_classes.?items.orValue([])
+      filter: r.?provisioner.orValue("") in params.pd_provisioners
+      kind: storage.k8s.io/StorageClass
+      name: r.metadata.name
+    params:
+      pd_provisioners: [pd.csi.storage.gke.io, kubernetes.io/gce-pd]
+      default_class_only: true
+      kms_key_pattern: '^projects/[^/]+/locations/[^/]+/keyRings/[^/]+/cryptoKeys/[^/]+$'
+    check:
+      assert: |
+        (
+          "disk-encryption-kms-key" in r.?parameters.orValue({})
+          && r.parameters["disk-encryption-kms-key"].matches(params.kms_key_pattern)
+        )
+        || (
+          params.default_class_only
+          && !["storageclass.kubernetes.io/is-default-class", "storageclass.beta.kubernetes.io/is-default-class"]
+                .exists(k, k in r.metadata.?annotations.orValue({}) && r.metadata.annotations[k] == "true")
+        )
+      review_when: |
+        !(
+          "disk-encryption-kms-key" in r.?parameters.orValue({})
+          && r.parameters["disk-encryption-kms-key"].matches(params.kms_key_pattern)
+        )
+      message: "StorageClass {{ .r.metadata.name }} provisions Persistent Disks without an approved Cloud KMS key (disk-encryption-kms-key)"
+      review_message: "StorageClass {{ .r.metadata.name }} is not the default class and has no approved disk-encryption-kms-key; confirm it is not used for sensitive data, or set default_class_only=false to require CMEK on every Persistent Disk class"
+    evidence:
+      - 'r.provisioner'
+      - 'r.?parameters.orValue({})'
+      - 'r.metadata.?annotations.orValue({}).filter(k, k.contains("is-default-class")).map(k, k + "=" + r.metadata.annotations[k])'
+    remediation: |
+      Grant the Compute Engine service agent roles/cloudkms.cryptoKeyEncrypterDecrypter on the key, then create a StorageClass with provisioner pd.csi.storage.gke.io and parameters.disk-encryption-kms-key: projects/<KMS_PROJECT>/locations/<LOCATION>/keyRings/<RING>/cryptoKeys/<KEY> (kubectl apply -f <FILE>), and make it the default:
+      kubectl annotate storageclass <CMEK_CLASS> storageclass.kubernetes.io/is-default-class=true --overwrite
+      kubectl annotate storageclass <OLD_DEFAULT> storageclass.kubernetes.io/is-default-class=false --overwrite
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/using-cmek
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/gce-pd-csi-driver
+    notes: |
+      Requires kubectl. Population: StorageClasses whose provisioner is in pd_provisioners (Persistent Disk
+      CSI driver and the legacy in-tree gce-pd). A class complies when parameters["disk-encryption-kms-key"]
+      is set and matches kms_key_pattern (default: any fully qualified Cloud KMS key; narrow it to approved
+      key rings). With default_class_only=true (default) only the default class (is-default-class annotation,
+      GA or beta, equal to "true") fails without CMEK and other Persistent Disk classes are REVIEW, because
+      CIS scopes the control to classes used for sensitive workloads; set default_class_only=false to require
+      CMEK on every Persistent Disk class. The CIS PersistentVolume and disk kmsKeyName checks are not
+      automated: CMEK only applies to newly provisioned volumes, and existing disks are not inspected.
+
+  - id: cis-gke-5.9.2
+    ref: "5.9.2"
+    title: Use CMEK protected boot disks for GKE node pools
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    params:
+      kms_key_pattern: '^projects/[^/]+/locations/[^/]+/keyRings/[^/]+/cryptoKeys/[^/]+$'
+    check:
+      assert: r.?config.?bootDiskKmsKey.orValue("").matches(params.kms_key_pattern)
+      message: "Node pool {{ .r.name }} boot disks are not encrypted with an approved Cloud KMS key (config.bootDiskKmsKey)"
+    evidence:
+      - 'r.?config.?bootDiskKmsKey.orValue("")'
+      - 'r.?config.?diskType.orValue("")'
+      - 'ctx.cluster.?autoscaling.?autoprovisioningNodePoolDefaults.?bootDiskKmsKey.orValue("")'
+    remediation: |
+      gcloud container node-pools create <NEW_POOL> --cluster=<CLUSTER> --location=<LOCATION> --project=<PROJECT> --disk-type=<DISK_TYPE> --boot-disk-kms-key=projects/<KMS_PROJECT>/locations/<LOCATION>/keyRings/<RING>/cryptoKeys/<KEY>
+      then migrate workloads and delete the old pool. Autopilot: recreate the cluster with gcloud container clusters create-auto ... --boot-disk-kms-key=<KEY>.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/using-cmek
+      - https://docs.cloud.google.com/kubernetes-engine/docs/reference/rest/v1/NodeConfig
+    notes: |
+      One result per node pool, Standard and Autopilot alike. config.bootDiskKmsKey must match
+      kms_key_pattern (default: any fully qualified Cloud KMS key; narrow it to approved key rings). The
+      default is Google-managed encryption, so absence fails. CMEK cannot be added in place: Standard pools
+      are replaced, and Autopilot clusters take the key only at creation (create-auto --boot-disk-kms-key),
+      which Google-managed pools inherit. The node auto-provisioning default
+      (autoscaling.autoprovisioningNodePoolDefaults.bootDiskKmsKey) is evidence only. Boot disk type support
+      (pd-standard or pd-ssd per CIS) is not judged.
+
+  - id: cis-gke-5.10.1
+    ref: "5.10.1"
+    title: Do not use GKE alpha clusters for production workloads
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    check:
+      assert: "!ctx.cluster.?enableKubernetesAlpha.orValue(false)"
+      message: "Cluster is an alpha cluster (enableKubernetesAlpha=true): no SLA, no upgrades or security patches, deleted after 30 days"
+    evidence:
+      - 'ctx.cluster.?enableKubernetesAlpha.orValue(false)'
+      - 'ctx.cluster.?expireTime.orValue("")'
+    remediation: |
+      Create a supported cluster without --enable-kubernetes-alpha, migrate workloads and data, then delete the alpha cluster:
+      gcloud container clusters create <CLUSTER> --location=<LOCATION> --project=<PROJECT>
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/alpha-clusters
+    notes: |
+      Mirrors the CIS audit: enableKubernetesAlpha must be false or absent (the default). Alpha clusters are
+      legitimate for short-lived non-production testing; record a profile exemption for those.
+
+  - id: cis-gke-5.10.2
+    ref: "5.10.2"
+    title: Use GKE Sandbox for untrusted or high risk workloads
+    profile: L2
+    cis_assessment: automated
+    mode: contextual
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    params:
+      sandbox_required_label_key: workload-class
+      sandbox_required_label_value: untrusted
+    check:
+      assert: |
+        !(
+          params.sandbox_required_label_key in r.?config.?labels.orValue({})
+          && r.config.labels[params.sandbox_required_label_key] == params.sandbox_required_label_value
+        )
+        || r.?config.?sandboxConfig.?type.orValue("").upperAscii() == "GVISOR"
+        || r.?config.?sandboxConfig.?sandboxType.orValue("").upperAscii() == "GVISOR"
+      review_when: |
+        !ctx.cluster.?nodePools.orValue([]).exists(p,
+          (
+            params.sandbox_required_label_key in p.?config.?labels.orValue({})
+            && p.config.labels[params.sandbox_required_label_key] == params.sandbox_required_label_value
+          )
+          || p.?config.?sandboxConfig.?type.orValue("").upperAscii() == "GVISOR"
+          || p.?config.?sandboxConfig.?sandboxType.orValue("").upperAscii() == "GVISOR")
+      message: "Node pool {{ .r.name }} is labelled {{ .params.sandbox_required_label_key }}={{ .params.sandbox_required_label_value }} for untrusted workloads but GKE Sandbox (gVisor) is not enabled"
+      review_message: "No node pool in this cluster is labelled {{ .params.sandbox_required_label_key }}={{ .params.sandbox_required_label_value }} or runs GKE Sandbox; confirm the cluster runs no untrusted, third-party or multi-tenant workloads, or label the pools that do"
+    evidence:
+      - 'r.?config.?labels.orValue({})'
+      - 'r.?config.?sandboxConfig.orValue({})'
+      - 'r.?config.?imageType.orValue("")'
+    remediation: |
+      gcloud container node-pools create <POOL> --cluster=<CLUSTER> --location=<LOCATION> --project=<PROJECT> --image-type=cos_containerd --sandbox=type=gvisor --node-labels=workload-class=untrusted
+      then set runtimeClassName: gvisor on the untrusted Pods and migrate them to the sandbox pool.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/sandbox-pods
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/sandbox-pods
+    notes: |
+      CIS leaves "untrusted or high risk" to the organization, so pools are designated by the node label
+      sandbox_required_label_key=sandbox_required_label_value (default workload-class=untrusted; set it to
+      the label your platform uses). FAIL: a designated pool lacks GKE Sandbox (config.sandboxConfig.type
+      GVISOR; the legacy sandboxType field is also accepted). REVIEW: no pool in the cluster is designated or
+      sandboxed, so it cannot be told whether untrusted workloads run there; label the pools that host them
+      or exempt the cluster. Autopilot is not applicable because sandboxed Pods get gVisor nodes on demand.
+      Whether untrusted Pods actually request runtimeClassName gvisor is not checked.
+
+  - id: cis-gke-5.10.3
+    ref: "5.10.3"
+    title: Enable the GKE security posture dashboard for cluster security insights
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    params:
+      allowed_modes: [BASIC, ENTERPRISE]
+      require_vulnerability_scanning: false
+      allowed_vulnerability_modes: [VULNERABILITY_BASIC, VULNERABILITY_ENTERPRISE]
+    check:
+      assert: |
+        ctx.cluster.?securityPostureConfig.?mode.orValue("MODE_UNSPECIFIED") in params.allowed_modes
+        && (!params.require_vulnerability_scanning
+            || ctx.cluster.?securityPostureConfig.?vulnerabilityMode.orValue("VULNERABILITY_MODE_UNSPECIFIED")
+                 in params.allowed_vulnerability_modes)
+      message: "Security posture configuration auditing is not enabled (securityPostureConfig.mode not in {{ .params.allowed_modes }}), or vulnerability scanning is required and disabled"
+    evidence:
+      - 'ctx.cluster.?securityPostureConfig.?mode.orValue("")'
+      - 'ctx.cluster.?securityPostureConfig.?vulnerabilityMode.orValue("")'
+    remediation: gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT> --security-posture=standard
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/about-security-posture-dashboard
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/about-configuration-scanning
+    notes: |
+      Requires securityPostureConfig.mode in allowed_modes (default BASIC or ENTERPRISE); a missing,
+      MODE_UNSPECIFIED or DISABLED mode fails. Per the CIS audit text, vulnerabilityMode may be
+      VULNERABILITY_DISABLED because the control targets configuration auditing, not the deprecated workload
+      vulnerability scanning; set require_vulnerability_scanning=true to also require a mode from
+      allowed_vulnerability_modes. Security posture BASIC is the default for new clusters.

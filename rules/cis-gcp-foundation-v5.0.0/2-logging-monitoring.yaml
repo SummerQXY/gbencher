@@ -1,0 +1,856 @@
+dsl_version: 1
+benchmark:
+  id: cis-gcp-foundation
+  version: "5.0.0"
+  section: "2"
+  title: Logging and Monitoring
+# Rules 2.5–2.12 need alert policy data; prefer GA gcloud commands, and the JSON fields feed the CEL conditions below.
+rules:
+  - id: cis-gcp-2.1
+    ref: "2.1"
+    title: Ensure That Cloud Audit Logging Is Configured Properly
+    profile: L1
+    cis_assessment: automated
+    mode: contextual
+    severity: medium
+    scope: project
+    collect:
+      - id: project_policy
+        gcloud: projects get-iam-policy {{ .project }} --format=json
+      - id: org_policy
+        gcloud: organizations get-iam-policy {{ .organization }} --format=json
+        on_error: skip
+        requires: [org-access]
+    params:
+      required_log_types: [DATA_READ, DATA_WRITE]
+    check:
+      assert: |
+        (
+          !has(data.org_policy)
+          || params.required_log_types.all(t,
+               (data.project_policy.?auditConfigs.orValue([]) + data.?org_policy.?auditConfigs.orValue([]))
+                 .exists(c, c.?service.orValue("") == "allServices"
+                   && c.?auditLogConfigs.orValue([]).exists(l, l.?logType.orValue("") == t)))
+        )
+        && !(data.project_policy.?auditConfigs.orValue([]) + data.?org_policy.?auditConfigs.orValue([]))
+             .exists(c, c.?auditLogConfigs.orValue([]).exists(l, size(l.?exemptedMembers.orValue([])) > 0))
+      review_when: |
+        !has(data.org_policy)
+        && !params.required_log_types.all(t,
+             data.project_policy.?auditConfigs.orValue([]).exists(c,
+               c.?service.orValue("") == "allServices"
+               && c.?auditLogConfigs.orValue([]).exists(l, l.?logType.orValue("") == t)))
+      message: "Data Access audit logs {{ .params.required_log_types }} are not enabled for allServices at the project or organization level, or an auditConfigs entry sets exemptedMembers"
+      review_message: "The project IAM policy has no allServices audit config with {{ .params.required_log_types }} and the organization IAM policy could not be read; confirm the configuration is inherited from the organization or a folder"
+    evidence:
+      - "data.project_policy.?auditConfigs.orValue([])"
+      - "data.?org_policy.?auditConfigs.orValue([])"
+    remediation: |
+      gcloud projects get-iam-policy <PROJECT_ID> --format=json > policy.json
+      add "auditConfigs": [{"service": "allServices", "auditLogConfigs": [{"logType": "DATA_READ"}, {"logType": "DATA_WRITE"}]}] without exemptedMembers, then
+      gcloud projects set-iam-policy <PROJECT_ID> policy.json
+      (or set it once for the organization with gcloud organizations get-iam-policy / set-iam-policy <ORG_ID>)
+    references:
+      - https://cloud.google.com/logging/docs/audit/
+      - https://cloud.google.com/logging/docs/audit/configure-data-access
+    notes: |
+      CIS requires an allServices audit config with DATA_READ and DATA_WRITE and no exemptedMembers in any
+      auditConfigs entry. projects get-iam-policy shows only the project's own auditConfigs, so the
+      organization IAM policy is also read when org-access is available. Log types are evaluated as the
+      union of both levels, as Cloud Audit Logs does for inherited configs; exemptedMembers at either level
+      fails. When the project has no compliant config and the organization policy could not be read
+      (org-access unavailable or no organization), the result is REVIEW; grant organization-level IAM
+      policy read to converge. Folder-level configs are not read: a project that inherits the config only
+      from a folder fails when the organization policy is readable, so exempt it in the profile.
+      Tune required_log_types, e.g. add ADMIN_READ to mirror the console audit. BigQuery Data Access logs
+      are always on and are not represented in auditConfigs.
+
+  - id: cis-gcp-2.2
+    ref: "2.2"
+    title: Ensure Google Workspace/Cloud Identity Data Sharing with Google Cloud is Enabled for Admin Audit Logging
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: medium
+    scope: organization
+    evaluate_per: organization
+    services: [logging.googleapis.com]
+    requires: [org-access, workspace-admin]
+    collect:
+      - id: workspace_audit_entries
+        gcloud: logging read 'protoPayload.serviceName="admin.googleapis.com" OR protoPayload.serviceName="login.googleapis.com"' --organization={{ .organization }} --limit=1 --freshness={{ .params.freshness_days }}d --format=json
+    params:
+      freshness_days: 30
+      fail_when_no_entries: false
+    params_constraints:
+      freshness_days:
+        minimum: 1
+        maximum: 365
+    check:
+      assert: size(data.workspace_audit_entries) > 0 || !params.fail_when_no_entries
+      review_when: size(data.workspace_audit_entries) == 0
+      message: "No Google Workspace/Cloud Identity admin or login audit entries reached organization Cloud Logging in the last {{ .params.freshness_days }} days"
+      review_message: "No Google Workspace/Cloud Identity admin or login audit entries in organization Cloud Logging in the last {{ .params.freshness_days }} days; confirm in the Google Admin console (Account > Account settings > Legal and compliance) that Google Cloud data sharing is enabled, or that there was no admin or login activity"
+    evidence:
+      - "data.workspace_audit_entries.map(e, e.?protoPayload.?serviceName.orValue(''))"
+      - "data.workspace_audit_entries.map(e, e.?timestamp.orValue(''))"
+    remediation: |
+      Google Admin console as a Super Admin: Account > Account settings > Legal and compliance >
+      Sharing options (Google Cloud Platform Sharing Options) > Enabled > Save.
+      Then confirm in Logs Explorer at the organization level that entries with
+      protoPayload.serviceName="admin.googleapis.com" arrive.
+    references:
+      - https://cloud.google.com/logging/docs/audit/gsuite-audit-logging
+    notes: |
+      CIS audits the sharing setting in the Google Admin console, which has no read API. With sharing
+      enabled, Workspace/Cloud Identity Admin and login audit entries are written to the organization's
+      Cloud Logging, so the rule reads one recent entry with serviceName admin.googleapis.com or
+      login.googleapis.com at the organization level (gcloud logging read is read-only). Entries present
+      pass. No entries is REVIEW, not FAIL, because an organization without admin or login activity in
+      freshness_days has none either. Tune freshness_days; set fail_when_no_entries=true when the
+      organization always has such activity in that window, so absence fails. Reading the entries needs
+      roles/logging.viewer on the organization.
+
+  - id: cis-gcp-2.3
+    ref: "2.3"
+    title: Ensure That Sinks Are Configured for All Log Entries
+    profile: L1
+    cis_assessment: automated
+    mode: contextual
+    severity: medium
+    scope: project
+    collect:
+      - id: sinks
+        gcloud: logging sinks list --project={{ .project }} --format=json
+        on_error: empty
+      - id: org_sinks
+        gcloud: logging sinks list --organization={{ .organization }} --format=json
+        on_error: skip
+        requires: [org-access]
+    check:
+      assert: |
+        data.sinks.exists(s,
+          !s.?disabled.orValue(false)
+          && s.?filter.orValue("").trim() in ["", "(empty filter)"])
+        || data.?org_sinks.orValue([]).exists(s,
+             s.?includeChildren.orValue(false)
+             && !s.?disabled.orValue(false)
+             && s.?filter.orValue("").trim() in ["", "(empty filter)"])
+        || !has(data.org_sinks)
+      review_when: |
+        !has(data.org_sinks)
+        && !data.sinks.exists(s,
+             !s.?disabled.orValue(false)
+             && s.?filter.orValue("").trim() in ["", "(empty filter)"])
+      message: "No enabled project sink without an inclusion filter, and no enabled organization sink with includeChildren and no filter, exports all log entries"
+      review_message: "No enabled project sink exports all log entries and organization sinks could not be read; confirm an aggregated sink (includeChildren, no filter) at the organization or a folder covers this project"
+    evidence:
+      - "data.sinks.map(s, {'name': s.name, 'destination': s.?destination.orValue(''), 'filter': s.?filter.orValue(''), 'disabled': s.?disabled.orValue(false), 'exclusions': s.?exclusions.orValue([]).map(e, e.?name.orValue(''))})"
+      - "data.?org_sinks.orValue([]).map(s, {'name': s.name, 'destination': s.?destination.orValue(''), 'filter': s.?filter.orValue(''), 'includeChildren': s.?includeChildren.orValue(false)})"
+    remediation: |
+      gcloud logging sinks create <SINK_NAME> storage.googleapis.com/<BUCKET_NAME>
+      or for all projects: gcloud logging sinks create <SINK_NAME> storage.googleapis.com/<BUCKET_NAME> --include-children --organization=<ORG_ID>
+      (omit --log-filter so the sink exports every entry)
+    references:
+      - https://cloud.google.com/logging/docs/export/configure_export_v2
+      - https://cloud.google.com/logging/docs/export/aggregated_exports
+      - https://cloud.google.com/logging/docs/routing/overview
+    notes: |
+      A project sink qualifies when it is enabled and its inclusion filter is absent or empty; gcloud
+      prints "(empty filter)" for such sinks, so that value counts as empty. The _Default and _Required
+      sinks carry filters and never qualify. When org-access is available, an enabled organization sink
+      with includeChildren=true and no filter also satisfies the rule. When no project sink qualifies and
+      organization sinks could not be read, the result is REVIEW; grant organization-level logging read
+      to converge. Folder-level aggregated sinks are not read: a project covered only by one fails when
+      organization sinks are readable, so exempt it in the profile. Sink exclusions are not evaluated
+      (CIS checks the inclusion filter only) and are reported in evidence. The CIS check that the
+      destination exists is not automated, since destinations span Cloud Storage, BigQuery, Pub/Sub and
+      log buckets in any project.
+
+  - id: cis-gcp-2.4
+    ref: "2.4"
+    title: Ensure That Retention Policies on Cloud Storage Buckets Used for Exporting Logs Are Configured Using Bucket Lock
+    profile: L2
+    cis_assessment: automated
+    mode: contextual
+    severity: medium
+    scope: project
+    services: [logging.googleapis.com]
+    collect:
+      - id: sinks
+        gcloud: logging sinks list --project={{ .project }} --format=json
+      - id: buckets
+        gcloud: storage buckets list --project={{ .project }} --format=json
+        on_error: empty
+    resource:
+      from: data.sinks
+      filter: r.?destination.orValue("").startsWith("storage.googleapis.com/")
+      kind: logging.googleapis.com/LogSink
+      name: r.name
+    check:
+      assert: |
+        data.buckets.filter(b, "storage.googleapis.com/" + b.name == r.destination)
+          .all(b, b.?retention_policy.?isLocked.orValue(false) == true)
+      review_when: |
+        !data.buckets.exists(b, "storage.googleapis.com/" + b.name == r.destination)
+      message: "Sink {{ .r.name }} exports to {{ .r.destination }}, whose retention policy is missing or not locked"
+      review_message: "Sink {{ .r.name }} exports to {{ .r.destination }}, which is not a bucket in this project; verify the retention policy and Bucket Lock in the project that owns it"
+    evidence:
+      - r.destination
+      - "data.buckets.filter(b, 'storage.googleapis.com/' + b.name == r.destination).map(b, b.?retention_policy.orValue({}))"
+    remediation: |
+      gsutil retention set <DURATION> gs://<BUCKET_NAME> && gsutil retention lock gs://<BUCKET_NAME>
+      or: gcloud storage buckets update gs://<BUCKET_NAME> --retention-period=<DURATION>
+      then: gcloud storage buckets update gs://<BUCKET_NAME> --lock-retention-period  (irreversible)
+    references:
+      - https://cloud.google.com/storage/docs/bucket-lock
+      - https://cloud.google.com/storage/docs/using-bucket-lock
+    notes: |
+      Population is every project sink whose destination is a Cloud Storage bucket. Buckets are listed
+      once and matched in CEL by "storage.googleapis.com/" + name; the matched bucket must have a
+      retention policy with isLocked=true (a locked policy always carries a retention period).
+      gcloud storage prints snake_case top-level keys (name, storage_url, retention_policy) rather than
+      REST camelCase; retention_policy itself keeps the API keys retentionPeriod and isLocked.
+      A destination bucket owned by another project cannot be read from this project and produces
+      REVIEW; verify it by scanning the owning project, then exempt the sink here. The bucket listing
+      uses on_error: empty so a project without the Cloud Storage API still reports its storage sinks
+      as REVIEW instead of NOT_APPLICABLE. Organization and folder sinks are not evaluated.
+
+  - id: cis-gcp-2.5
+    ref: "2.5"
+    title: Ensure Log Metric Filter and Alerts Exist for Project Ownership Assignments/Changes
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: metrics
+        gcloud: logging metrics list --project={{ .project }} --format=json
+        on_error: empty
+      - id: alert_policies
+        # Monitoring Policy JSON keeps the fields the assert needs: enabled, conditions, notificationChannels, etc.
+        gcloud: monitoring policies list --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      filter_patterns:
+        - 'cloudresourcemanager\.googleapis\.com'
+        - 'ProjectOwnership|projectOwnerInvitee'
+        - 'roles/owner'
+      require_notification_channel: true
+    check:
+      assert: |
+        data.metrics.exists(m,
+          params.filter_patterns.all(p, m.?filter.orValue("").matches(p))
+          && data.alert_policies.exists(ap,
+               ap.?enabled.orValue(false)
+               && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+               && ap.?conditions.orValue([]).exists(c,
+                    c.?conditionThreshold.?filter.orValue("").contains("logging.googleapis.com/user/" + m.name))))
+      message: "No enabled alert policy backed by a log metric for project ownership changes"
+    evidence: ["data.metrics.map(m, m.name)", "data.alert_policies.map(p, p.displayName)"]
+    remediation: |
+      gcloud logging metrics create <NAME> --description="Owner changes" --log-filter='<FILTER>'
+      then create an alert policy on logging.googleapis.com/user/<NAME> with a notification channel
+    references:
+      - https://cloud.google.com/logging/docs/logs-based-metrics/
+      - https://cloud.google.com/monitoring/alerts
+    notes: |
+      Alert policies are collected with the GA gcloud monitoring policies list command. Its JSON
+      resources expose the Monitoring API alert-policy fields consumed by the assertion.
+      Filter matching is pattern-based rather than exact-string to tolerate whitespace and quoting
+      differences. A notification channel is required by default; set
+      require_notification_channel=false to relax.
+
+  - id: cis-gcp-2.6
+    ref: "2.6"
+    title: Ensure That the Log Metric Filter and Alerts Exist for Audit Configuration Changes
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: metrics
+        gcloud: logging metrics list --project={{ .project }} --format=json
+        on_error: empty
+      - id: alert_policies
+        # Monitoring Policy JSON keeps the fields the assert needs.
+        gcloud: monitoring policies list --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      filter_patterns:
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*SetIamPolicy'
+        - 'protoPayload\.serviceData\.policyDelta\.auditConfigDeltas'
+      require_notification_channel: true
+    check:
+      assert: |
+        data.metrics.exists(m,
+          params.filter_patterns.all(p, m.?filter.orValue("").matches(p))
+          && data.alert_policies.exists(ap,
+               ap.?enabled.orValue(false)
+               && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+               && ap.?conditions.orValue([]).exists(c,
+                    c.?conditionThreshold.?filter.orValue("").contains("logging.googleapis.com/user/" + m.name))))
+        || data.alert_policies.exists(ap,
+             ap.?enabled.orValue(false)
+             && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+             && ap.?conditions.orValue([]).exists(c,
+                  params.filter_patterns.all(p, c.?conditionMatchedLog.?filter.orValue("").matches(p))))
+      message: "No enabled alert policy backed by a log metric or a log-match condition for audit configuration changes"
+    evidence:
+      - "data.metrics.filter(m, params.filter_patterns.all(p, m.?filter.orValue('').matches(p))).map(m, m.name)"
+      - "data.alert_policies.map(p, p.?displayName.orValue(p.name))"
+    remediation: |
+      gcloud logging metrics create <NAME> --description="Audit configuration changes" --log-filter='protoPayload.methodName="SetIamPolicy" AND protoPayload.serviceData.policyDelta.auditConfigDeltas:*'
+      then create an alert policy on logging.googleapis.com/user/<NAME> with a notification channel
+    references:
+      - https://cloud.google.com/logging/docs/logs-based-metrics/
+      - https://cloud.google.com/monitoring/alerts/
+      - https://cloud.google.com/logging/docs/audit/configure-data-access
+    notes: |
+      Same strategy as 2.5: a user-defined log metric whose filter matches every regex in
+      filter_patterns, plus an enabled alert policy with a conditionThreshold on
+      logging.googleapis.com/user/<metric>. A log-based alert policy whose conditionMatchedLog.filter
+      matches the same patterns is accepted as an alternative. The patterns follow the CIS filter
+      (SetIamPolicy plus a reference to policyDelta.auditConfigDeltas) and tolerate whitespace,
+      optional quotes and the = or : operator; override filter_patterns when an equivalent filter is
+      written differently. GA gcloud monitoring policies list supplies the alert-policy fields used by the
+      assertion. Set require_notification_channel=false to relax.
+
+  - id: cis-gcp-2.7
+    ref: "2.7"
+    title: Ensure That the Log Metric Filter and Alerts Exist for Custom Role Changes
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: metrics
+        gcloud: logging metrics list --project={{ .project }} --format=json
+        on_error: empty
+      - id: alert_policies
+        # Monitoring Policy JSON keeps the fields the assert needs.
+        gcloud: monitoring policies list --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      filter_patterns:
+        - 'resource\.type\s*[:=]\s*"?iam_role'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*CreateRole'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*DeleteRole'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*UpdateRole'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*UndeleteRole'
+      require_notification_channel: true
+    check:
+      assert: |
+        data.metrics.exists(m,
+          params.filter_patterns.all(p, m.?filter.orValue("").matches(p))
+          && data.alert_policies.exists(ap,
+               ap.?enabled.orValue(false)
+               && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+               && ap.?conditions.orValue([]).exists(c,
+                    c.?conditionThreshold.?filter.orValue("").contains("logging.googleapis.com/user/" + m.name))))
+        || data.alert_policies.exists(ap,
+             ap.?enabled.orValue(false)
+             && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+             && ap.?conditions.orValue([]).exists(c,
+                  params.filter_patterns.all(p, c.?conditionMatchedLog.?filter.orValue("").matches(p))))
+      message: "No enabled alert policy backed by a log metric or a log-match condition for custom role changes"
+    evidence:
+      - "data.metrics.filter(m, params.filter_patterns.all(p, m.?filter.orValue('').matches(p))).map(m, m.name)"
+      - "data.alert_policies.map(p, p.?displayName.orValue(p.name))"
+    remediation: |
+      gcloud logging metrics create <NAME> --description="Custom role changes" --log-filter='resource.type="iam_role" AND (protoPayload.methodName="google.iam.admin.v1.CreateRole" OR protoPayload.methodName="google.iam.admin.v1.DeleteRole" OR protoPayload.methodName="google.iam.admin.v1.UpdateRole" OR protoPayload.methodName="google.iam.admin.v1.UndeleteRole")'
+      then create an alert policy on logging.googleapis.com/user/<NAME> with a notification channel
+    references:
+      - https://cloud.google.com/logging/docs/logs-based-metrics/
+      - https://cloud.google.com/monitoring/alerts/
+      - https://cloud.google.com/iam/docs/understanding-custom-roles
+    notes: |
+      Same strategy as 2.5: a user-defined log metric whose filter matches every regex in
+      filter_patterns, plus an enabled alert policy with a conditionThreshold on
+      logging.googleapis.com/user/<metric>. A log-based alert policy whose conditionMatchedLog.filter
+      matches the same patterns is accepted as an alternative. The patterns follow the CIS filter clause
+      by clause (resource.type iam_role and the CreateRole, DeleteRole, UpdateRole and UndeleteRole
+      methods, as in CIS v5) and tolerate whitespace, optional quotes, the = or : operator and the
+      google.iam.admin.v1 prefix; override filter_patterns when an equivalent filter is written
+      differently, e.g. as one regex methodName clause. GA gcloud monitoring policies list supplies the alert-policy fields used by the assertion. Set require_notification_channel=false to relax.
+
+  - id: cis-gcp-2.8
+    ref: "2.8"
+    title: Ensure That the Log Metric Filter and Alerts Exist for VPC Network Firewall Rule Changes
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: metrics
+        gcloud: logging metrics list --project={{ .project }} --format=json
+        on_error: empty
+      - id: alert_policies
+        # Monitoring Policy JSON keeps the fields the assert needs.
+        gcloud: monitoring policies list --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      filter_patterns:
+        - 'resource\.type\s*[:=]\s*"?gce_firewall_rule'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*compute\.firewalls\.patch'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*compute\.firewalls\.insert'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*compute\.firewalls\.delete'
+      require_notification_channel: true
+    check:
+      assert: |
+        data.metrics.exists(m,
+          params.filter_patterns.all(p, m.?filter.orValue("").matches(p))
+          && data.alert_policies.exists(ap,
+               ap.?enabled.orValue(false)
+               && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+               && ap.?conditions.orValue([]).exists(c,
+                    c.?conditionThreshold.?filter.orValue("").contains("logging.googleapis.com/user/" + m.name))))
+        || data.alert_policies.exists(ap,
+             ap.?enabled.orValue(false)
+             && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+             && ap.?conditions.orValue([]).exists(c,
+                  params.filter_patterns.all(p, c.?conditionMatchedLog.?filter.orValue("").matches(p))))
+      message: "No enabled alert policy backed by a log metric or a log-match condition for VPC firewall rule changes"
+    evidence:
+      - "data.metrics.filter(m, params.filter_patterns.all(p, m.?filter.orValue('').matches(p))).map(m, m.name)"
+      - "data.alert_policies.map(p, p.?displayName.orValue(p.name))"
+    remediation: |
+      gcloud logging metrics create <NAME> --description="Firewall rule changes" --log-filter='resource.type="gce_firewall_rule" AND (protoPayload.methodName:"compute.firewalls.patch" OR protoPayload.methodName:"compute.firewalls.insert" OR protoPayload.methodName:"compute.firewalls.delete")'
+      then create an alert policy on logging.googleapis.com/user/<NAME> with a notification channel
+    references:
+      - https://cloud.google.com/logging/docs/logs-based-metrics/
+      - https://cloud.google.com/monitoring/alerts/
+      - https://cloud.google.com/vpc/docs/firewalls
+    notes: |
+      Same strategy as 2.5: a user-defined log metric whose filter matches every regex in
+      filter_patterns, plus an enabled alert policy with a conditionThreshold on
+      logging.googleapis.com/user/<metric>. A log-based alert policy whose conditionMatchedLog.filter
+      matches the same patterns is accepted as an alternative. The patterns follow the CIS filter clause
+      by clause (resource.type gce_firewall_rule and the patch, insert and delete methods) and tolerate
+      whitespace, optional quotes, the = or : operator and v1./beta. method prefixes; override
+      filter_patterns when an equivalent filter is written differently. GA gcloud monitoring policies list
+      supplies the alert-policy fields used by the assertion. Set require_notification_channel=false
+      to relax.
+
+  - id: cis-gcp-2.9
+    ref: "2.9"
+    title: Ensure That the Log Metric Filter and Alerts Exist for VPC Network Route Changes
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: metrics
+        gcloud: logging metrics list --project={{ .project }} --format=json
+        on_error: empty
+      - id: alert_policies
+        # Monitoring Policy JSON keeps the fields the assert needs.
+        gcloud: monitoring policies list --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      filter_patterns:
+        - 'resource\.type\s*[:=]\s*"?gce_route'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*compute\.routes\.delete'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*compute\.routes\.insert'
+      require_notification_channel: true
+    check:
+      assert: |
+        data.metrics.exists(m,
+          params.filter_patterns.all(p, m.?filter.orValue("").matches(p))
+          && data.alert_policies.exists(ap,
+               ap.?enabled.orValue(false)
+               && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+               && ap.?conditions.orValue([]).exists(c,
+                    c.?conditionThreshold.?filter.orValue("").contains("logging.googleapis.com/user/" + m.name))))
+        || data.alert_policies.exists(ap,
+             ap.?enabled.orValue(false)
+             && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+             && ap.?conditions.orValue([]).exists(c,
+                  params.filter_patterns.all(p, c.?conditionMatchedLog.?filter.orValue("").matches(p))))
+      message: "No enabled alert policy backed by a log metric or a log-match condition for VPC route changes"
+    evidence:
+      - "data.metrics.filter(m, params.filter_patterns.all(p, m.?filter.orValue('').matches(p))).map(m, m.name)"
+      - "data.alert_policies.map(p, p.?displayName.orValue(p.name))"
+    remediation: |
+      gcloud logging metrics create <NAME> --description="Route changes" --log-filter='resource.type="gce_route" AND (protoPayload.methodName:"compute.routes.delete" OR protoPayload.methodName:"compute.routes.insert")'
+      then create an alert policy on logging.googleapis.com/user/<NAME> with a notification channel
+    references:
+      - https://cloud.google.com/logging/docs/logs-based-metrics/
+      - https://cloud.google.com/monitoring/custom-metrics/
+      - https://cloud.google.com/monitoring/alerts/
+    notes: |
+      Same strategy as 2.5: a user-defined log metric whose filter matches every regex in
+      filter_patterns, plus an enabled alert policy with a conditionThreshold on
+      logging.googleapis.com/user/<metric>. A log-based alert policy whose conditionMatchedLog.filter
+      matches the same patterns is accepted as an alternative. The patterns follow the CIS filter clause
+      by clause (resource.type gce_route and the delete and insert methods) and tolerate whitespace,
+      optional quotes, the = or : operator and v1./beta. method prefixes; override filter_patterns when
+      an equivalent filter is written differently. GA gcloud monitoring policies list supplies the alert-policy fields used by the assertion. Set require_notification_channel=false to relax.
+
+  - id: cis-gcp-2.10
+    ref: "2.10"
+    title: Ensure That the Log Metric Filter and Alerts Exist for VPC Network Changes
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: metrics
+        gcloud: logging metrics list --project={{ .project }} --format=json
+        on_error: empty
+      - id: alert_policies
+        # Monitoring Policy JSON keeps the fields the assert needs.
+        gcloud: monitoring policies list --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      filter_patterns:
+        - 'resource\.type\s*[:=]\s*"?gce_network'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*compute\.networks\.insert'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*compute\.networks\.patch'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*compute\.networks\.delete'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*compute\.networks\.removePeering'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*compute\.networks\.addPeering'
+      require_notification_channel: true
+    check:
+      assert: |
+        data.metrics.exists(m,
+          params.filter_patterns.all(p, m.?filter.orValue("").matches(p))
+          && data.alert_policies.exists(ap,
+               ap.?enabled.orValue(false)
+               && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+               && ap.?conditions.orValue([]).exists(c,
+                    c.?conditionThreshold.?filter.orValue("").contains("logging.googleapis.com/user/" + m.name))))
+        || data.alert_policies.exists(ap,
+             ap.?enabled.orValue(false)
+             && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+             && ap.?conditions.orValue([]).exists(c,
+                  params.filter_patterns.all(p, c.?conditionMatchedLog.?filter.orValue("").matches(p))))
+      message: "No enabled alert policy backed by a log metric or a log-match condition for VPC network changes"
+    evidence:
+      - "data.metrics.filter(m, params.filter_patterns.all(p, m.?filter.orValue('').matches(p))).map(m, m.name)"
+      - "data.alert_policies.map(p, p.?displayName.orValue(p.name))"
+    remediation: |
+      gcloud logging metrics create <NAME> --description="VPC network changes" --log-filter='resource.type="gce_network" AND (protoPayload.methodName:"compute.networks.insert" OR protoPayload.methodName:"compute.networks.patch" OR protoPayload.methodName:"compute.networks.delete" OR protoPayload.methodName:"compute.networks.removePeering" OR protoPayload.methodName:"compute.networks.addPeering")'
+      then create an alert policy on logging.googleapis.com/user/<NAME> with a notification channel
+    references:
+      - https://cloud.google.com/logging/docs/logs-based-metrics/
+      - https://cloud.google.com/monitoring/alerts/
+      - https://cloud.google.com/vpc/docs/overview
+    notes: |
+      Same strategy as 2.5: a user-defined log metric whose filter matches every regex in
+      filter_patterns, plus an enabled alert policy with a conditionThreshold on
+      logging.googleapis.com/user/<metric>. A log-based alert policy whose conditionMatchedLog.filter
+      matches the same patterns is accepted as an alternative. The patterns follow the CIS filter clause
+      by clause (resource.type gce_network and the insert, patch, delete, removePeering and addPeering
+      methods). The CIS console filter (methodName:"compute.networks.insert") and CLI filter
+      (methodName="beta.compute.networks.insert", "v1.compute.networks.delete") both match because the
+      patterns tolerate whitespace, optional quotes, the = or : operator and method prefixes; override
+      filter_patterns when an equivalent filter is written differently. GA gcloud monitoring policies list
+      supplies the alert-policy fields used by the assertion. Set require_notification_channel=false
+      to relax.
+
+  - id: cis-gcp-2.11
+    ref: "2.11"
+    title: Ensure That the Log Metric Filter and Alerts Exist for Cloud Storage IAM Permission Changes
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: metrics
+        gcloud: logging metrics list --project={{ .project }} --format=json
+        on_error: empty
+      - id: alert_policies
+        # Monitoring Policy JSON keeps the fields the assert needs.
+        gcloud: monitoring policies list --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      filter_patterns:
+        - 'resource\.type\s*[:=]\s*"?gcs_bucket'
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*storage\.setIamPermissions'
+      require_notification_channel: true
+    check:
+      assert: |
+        data.metrics.exists(m,
+          params.filter_patterns.all(p, m.?filter.orValue("").matches(p))
+          && data.alert_policies.exists(ap,
+               ap.?enabled.orValue(false)
+               && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+               && ap.?conditions.orValue([]).exists(c,
+                    c.?conditionThreshold.?filter.orValue("").contains("logging.googleapis.com/user/" + m.name))))
+        || data.alert_policies.exists(ap,
+             ap.?enabled.orValue(false)
+             && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+             && ap.?conditions.orValue([]).exists(c,
+                  params.filter_patterns.all(p, c.?conditionMatchedLog.?filter.orValue("").matches(p))))
+      message: "No enabled alert policy backed by a log metric or a log-match condition for Cloud Storage IAM permission changes"
+    evidence:
+      - "data.metrics.filter(m, params.filter_patterns.all(p, m.?filter.orValue('').matches(p))).map(m, m.name)"
+      - "data.alert_policies.map(p, p.?displayName.orValue(p.name))"
+    remediation: |
+      gcloud logging metrics create <NAME> --description="Cloud Storage IAM changes" --log-filter='resource.type="gcs_bucket" AND protoPayload.methodName="storage.setIamPermissions"'
+      then create an alert policy on logging.googleapis.com/user/<NAME> with a notification channel
+    references:
+      - https://cloud.google.com/logging/docs/logs-based-metrics/
+      - https://cloud.google.com/monitoring/alerts/
+      - https://cloud.google.com/storage/docs/access-control/iam-roles
+    notes: |
+      Same strategy as 2.5: a user-defined log metric whose filter matches every regex in
+      filter_patterns, plus an enabled alert policy with a conditionThreshold on
+      logging.googleapis.com/user/<metric>. A log-based alert policy whose conditionMatchedLog.filter
+      matches the same patterns is accepted as an alternative. The patterns follow the CIS filter clause
+      by clause (resource.type gcs_bucket and storage.setIamPermissions) and tolerate whitespace,
+      optional quotes (CIS itself writes resource.type=gcs_bucket unquoted in the CLI audit) and the
+      = or : operator; override filter_patterns when an equivalent filter is written differently.
+      CIS scopes this to projects that contain Cloud Storage buckets but the rule applies to every
+      project, so a project without buckets can be exempted in the profile.
+      Alert policies are collected with GA gcloud monitoring policies list; JSON output retains the alert-policy fields used by the assertion.
+      Set require_notification_channel=false to relax.
+
+  - id: cis-gcp-2.12
+    ref: "2.12"
+    title: Ensure That the Log Metric Filter and Alerts Exist for SQL Instance Configuration Changes
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: metrics
+        gcloud: logging metrics list --project={{ .project }} --format=json
+        on_error: empty
+      - id: alert_policies
+        # Monitoring Policy JSON keeps the fields the assert needs.
+        gcloud: monitoring policies list --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      filter_patterns:
+        - 'protoPayload\.methodName\s*[:=]\s*"?[\w.]*cloudsql\.instances\.update'
+      require_notification_channel: true
+    check:
+      assert: |
+        data.metrics.exists(m,
+          params.filter_patterns.all(p, m.?filter.orValue("").matches(p))
+          && data.alert_policies.exists(ap,
+               ap.?enabled.orValue(false)
+               && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+               && ap.?conditions.orValue([]).exists(c,
+                    c.?conditionThreshold.?filter.orValue("").contains("logging.googleapis.com/user/" + m.name))))
+        || data.alert_policies.exists(ap,
+             ap.?enabled.orValue(false)
+             && (!params.require_notification_channel || size(ap.?notificationChannels.orValue([])) > 0)
+             && ap.?conditions.orValue([]).exists(c,
+                  params.filter_patterns.all(p, c.?conditionMatchedLog.?filter.orValue("").matches(p))))
+      message: "No enabled alert policy backed by a log metric or a log-match condition for Cloud SQL instance configuration changes"
+    evidence:
+      - "data.metrics.filter(m, params.filter_patterns.all(p, m.?filter.orValue('').matches(p))).map(m, m.name)"
+      - "data.alert_policies.map(p, p.?displayName.orValue(p.name))"
+    remediation: |
+      gcloud logging metrics create <NAME> --description="Cloud SQL instance configuration changes" --log-filter='protoPayload.methodName="cloudsql.instances.update"'
+      then create an alert policy on logging.googleapis.com/user/<NAME> with a notification channel
+    references:
+      - https://cloud.google.com/logging/docs/logs-based-metrics/
+      - https://cloud.google.com/monitoring/alerts/
+      - https://cloud.google.com/sql/docs/
+    notes: |
+      Same strategy as 2.5: a user-defined log metric whose filter matches every regex in
+      filter_patterns, plus an enabled alert policy with a conditionThreshold on
+      logging.googleapis.com/user/<metric>. A log-based alert policy whose conditionMatchedLog.filter
+      matches the same patterns is accepted as an alternative. The pattern follows the CIS filter
+      (methodName cloudsql.instances.update) and tolerates whitespace, optional quotes and the = or :
+      operator; override filter_patterns when an equivalent filter is written differently. CIS scopes
+      this to projects that contain Cloud SQL instances but the rule applies to every project, so a
+      project without Cloud SQL can be exempted in the profile. GA gcloud monitoring policies list supplies the alert-policy fields used by the assertion. Set require_notification_channel=false
+      to relax.
+
+  - id: cis-gcp-2.13
+    ref: "2.13"
+    title: Ensure That Cloud DNS Logging Is Enabled for All VPC Networks
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: networks
+        gcloud: compute networks list --project={{ .project }} --format=json
+      - id: dns_policies
+        gcloud: dns policies list --project={{ .project }} --format=json
+        on_error: empty
+    resource:
+      from: data.networks
+      kind: compute.googleapis.com/Network
+      name: r.name
+    check:
+      assert: |
+        data.dns_policies.exists(p,
+          p.?enableLogging.orValue(false) == true
+          && p.?networks.orValue([]).exists(n, n.?networkUrl.orValue("").endsWith("/networks/" + r.name)))
+      message: "VPC network {{ .r.name }} is not bound to a DNS server policy with logging enabled"
+    evidence:
+      - "data.dns_policies.filter(p, p.?networks.orValue([]).exists(n, n.?networkUrl.orValue('').endsWith('/networks/' + r.name))).map(p, {'policy': p.name, 'enableLogging': p.?enableLogging.orValue(false)})"
+    remediation: |
+      gcloud dns policies create enable-dns-logging --enable-logging --description="Enable DNS Logging" --networks=<VPC_NETWORK_NAME>
+      or for an existing policy: gcloud dns policies update <POLICY_NAME> --enable-logging --networks=<VPC_NETWORK_NAME>
+    references:
+      - https://cloud.google.com/dns/docs/monitoring
+    notes: |
+      Every VPC network in the project must be bound to a DNS server policy with enableLogging=true;
+      policies are matched to a network by the name at the end of networks[].networkUrl. DNS logging
+      is off by default, so a network without such a policy fails. The Cloud DNS API is deliberately
+      not listed in services and its step uses on_error: empty: without the API no server policy can
+      exist, so every network fails instead of the rule becoming NOT_APPLICABLE. Shared VPC service
+      projects own no networks; the host project's networks are evaluated when the host is scanned.
+
+  - id: cis-gcp-2.14
+    ref: "2.14"
+    title: Ensure Cloud Asset Inventory Is Enabled
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    collect:
+      - id: enabled_services
+        gcloud: services list --enabled --project={{ .project }} --format=json
+    check:
+      assert: |
+        data.enabled_services.exists(s,
+          s.?config.?name.orValue("") == "cloudasset.googleapis.com"
+          || s.?name.orValue("").endsWith("/services/cloudasset.googleapis.com"))
+      message: "The Cloud Asset API (cloudasset.googleapis.com) is not enabled"
+    evidence:
+      - "data.enabled_services.map(s, s.?config.?name.orValue('')).filter(n, n == 'cloudasset.googleapis.com')"
+    remediation: gcloud services enable cloudasset.googleapis.com --project=<PROJECT_ID>
+    references:
+      - https://cloud.google.com/asset-inventory/docs
+    notes: |
+      Mirrors the CIS audit (gcloud services list --enabled). A disabled Cloud Asset API is itself the
+      finding, so cloudasset.googleapis.com is deliberately not listed in services. Entries are matched
+      on config.name, with the resource name suffix (projects/<n>/services/<api>) as a fallback.
+      Severity is low because Asset Inventory records history without the API; the API is what enables
+      search and export.
+
+  - id: cis-gcp-2.15
+    ref: "2.15"
+    title: Ensure 'Access Transparency' is 'Enabled'
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: medium
+    scope: project
+    collect:
+      - id: logs
+        gcloud: logging logs list --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      fail_when_no_logs: false
+    check:
+      assert: |
+        !params.fail_when_no_logs
+        || data.logs.exists(l,
+             l.endsWith("/logs/cloudaudit.googleapis.com%2Faccess_transparency")
+             || l.endsWith("/logs/cloudaudit.googleapis.com/access_transparency"))
+      review_when: |
+        !data.logs.exists(l,
+          l.endsWith("/logs/cloudaudit.googleapis.com%2Faccess_transparency")
+          || l.endsWith("/logs/cloudaudit.googleapis.com/access_transparency"))
+      message: "The project has no Access Transparency log and fail_when_no_logs is set"
+      review_message: "No Access Transparency log entries exist in this project. Access Transparency is enabled at the organization level (IAM & Admin > Settings) and requires a Premium or Enhanced support plan; missing logs can also mean Google personnel have not accessed the project within log retention. Confirm the organization setting."
+    evidence:
+      - "data.logs.filter(l, l.contains('access_transparency'))"
+    remediation: |
+      Google Cloud console > IAM & Admin > Settings > Enable Access Transparency for Organization
+      (needs the Access Transparency Admin role, roles/axt.admin, a billing account on the project and a
+      qualifying support plan)
+    references:
+      - https://cloud.google.com/cloud-provider-access-management/access-transparency/docs/overview
+      - https://cloud.google.com/cloud-provider-access-management/access-transparency/docs/enable
+    notes: |
+      Access Transparency has no gcloud or REST endpoint that reports whether it is enabled. Proxy:
+      Access Transparency entries (log cloudaudit.googleapis.com/access_transparency, kept in the
+      _Required bucket) exist only when the feature is on, so the log being present in
+      gcloud logging logs list passes. Absence is REVIEW, because it also happens when Google personnel
+      have not accessed the project within log retention. Set fail_when_no_logs=true to report absence
+      as FAIL, e.g. after confirming the organization does not have Access Transparency enabled.
+
+  - id: cis-gcp-2.16
+    ref: "2.16"
+    title: Ensure 'Access Approval' is 'Enabled'
+    profile: L2
+    cis_assessment: manual
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: settings
+        gcloud: access-approval settings get --project={{ .project }} --format=json
+        on_error: empty
+    check:
+      assert: |
+        size(data.settings.?enrolledServices.orValue([])) > 0
+        && size(data.settings.?notificationEmails.orValue([])) > 0
+      message: "Access Approval is not enrolled or has no notification emails"
+    evidence: [data.settings]
+    remediation: gcloud access-approval settings update --project=<PROJECT> --enrolled_services=all --notification_emails=<EMAILS>
+    references:
+      - https://cloud.google.com/assured-workloads/access-approval/docs/overview
+    notes: |
+      CIS marks this Manual because the API returns errors when the product is not enrolled.
+      The API-not-enabled and FAILED_PRECONDITION errors both mean "not enabled", so on_error: empty
+      turns them into an empty settings object and the assertion fails. Permission errors still SKIP.
+      accessapproval.googleapis.com is deliberately not listed in services.
+
+  - id: cis-gcp-2.17
+    ref: "2.17"
+    title: Ensure Logging is enabled for HTTP(S) Load Balancer
+    profile: L2
+    cis_assessment: automated
+    mode: contextual
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: backend_services
+        gcloud: compute backend-services list --project={{ .project }} --format=json
+    resource:
+      from: data.backend_services
+      filter: |
+        r.?protocol.orValue("HTTP") in params.http_protocols
+        && r.?loadBalancingScheme.orValue("EXTERNAL") in params.load_balancing_schemes
+      kind: compute.googleapis.com/BackendService
+      name: '(has(r.region) ? r.region.substring(r.region.lastIndexOf("/") + 1) : "global") + "/" + r.name'
+    params:
+      http_protocols: [HTTP, HTTPS, HTTP2, H2C]
+      load_balancing_schemes: [EXTERNAL, EXTERNAL_MANAGED, INTERNAL_MANAGED]
+      min_sample_rate: 1.0
+    check:
+      assert: |
+        r.?logConfig.?enable.orValue(false) == true
+        && r.?logConfig.?sampleRate.orValue(1.0) >= params.min_sample_rate
+      message: "Backend service {{ .r.name }} has request logging disabled or a sample rate below {{ .params.min_sample_rate }}"
+    evidence:
+      - "r.?loadBalancingScheme.orValue('')"
+      - "r.?protocol.orValue('')"
+      - "r.?logConfig.orValue({})"
+    remediation: gcloud compute backend-services update <BACKEND_SERVICE> --global|--region=<REGION> --enable-logging --logging-sample-rate=<RATE>
+    references:
+      - https://cloud.google.com/load-balancing/docs/https/https-logging-monitoring
+      - https://cloud.google.com/sdk/gcloud/reference/compute/backend-services/
+    notes: |
+      CIS audits backend services of HTTP(S) load balancers with backend-services describe; the list
+      command returns the same objects for global and regional backend services. Population: backend
+      services whose protocol is in http_protocols and loadBalancingScheme in load_balancing_schemes,
+      i.e. classic, global/regional external and internal Application Load Balancers by default; drop
+      INTERNAL_MANAGED to cover internet-facing load balancers only. CIS leaves the sample rate to the
+      organization; min_sample_rate defaults to 1.0, the rate Google applies when logging is enabled,
+      so lower it to the rate your organization accepts for high-traffic services. Results are named
+      <region|global>/<name> because regional backend services can share a name.

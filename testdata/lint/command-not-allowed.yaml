@@ -1,0 +1,30 @@
+# Lint fixture: the only defect is a gcloud command that is not on the allowlist. A read verb used
+# as a resource name ("delete list") makes a different command out of the list command.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-command-not-allowed-1
+    ref: "1.1"
+    title: Fixture with a command that is not on the allowlist
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances delete list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: r.name
+    check:
+      assert: r.status == "RUNNING"
+      message: "Instance {{ .r.name }} is not running"
+    remediation: Start the instance.
+    notes: Fixture for the lint tests.

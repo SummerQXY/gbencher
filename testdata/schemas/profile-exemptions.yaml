@@ -1,0 +1,6 @@
+dsl_version: 1
+name: example
+exemptions:
+  - rule: cis-gcp-4.9
+    resources: ["projects/example-prod/zones/*/instances/bastion-*"]
+    reason: Bastion hosts are intentionally public

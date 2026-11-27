@@ -1,0 +1,25 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {},
+  "expect": [
+    {
+      "rule_id": "cis-gke-5.6.7",
+      "resource_key": "projects/example-project/locations/us-central1/clusters/example-cluster",
+      "status": "NOT_APPLICABLE"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "ingresses": "schema",
+      "managed_certs": "schema"
+    }
+  },
+  "disabled_services": [
+    "container.googleapis.com"
+  ]
+}

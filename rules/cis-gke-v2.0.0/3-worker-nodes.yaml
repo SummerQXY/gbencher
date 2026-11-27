@@ -1,0 +1,153 @@
+dsl_version: 1
+benchmark:
+  id: cis-gke
+  version: "2.0.0"
+  section: "3"
+  title: Worker Nodes
+# GKE rule design convention: scope: cluster means the engine enumerates clusters and injects the current cluster JSON into ctx.cluster and implicit data.cluster; rules must not repeat a cluster-level collect.
+rules:
+  - id: cis-gke-3.1.1
+    ref: "3.1.1"
+    title: Ensure that the kubeconfig file permissions are set to 644 or more restrictive
+    profile: L1
+    cis_assessment: automated
+    mode: contextual
+    severity: medium
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: nodes
+        kubectl: get nodes -o json
+    resource:
+      from: data.nodes.items
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: k8s.io/Node
+      name: r.metadata.name
+      key: 'r.metadata.?labels.orValue({})[?"cloud.google.com/gke-nodepool"].orValue(r.metadata.name)'
+    params:
+      managed_os_prefix: Container-Optimized OS
+    check:
+      assert: "true"
+      review_when: "!r.?status.?nodeInfo.?osImage.orValue('').startsWith(params.managed_os_prefix)"
+      message: "kubeconfig on node {{ .r.metadata.name }} cannot be verified without node access"
+      review_message: "node {{ .r.metadata.name }} does not run Container-Optimized OS; kubeconfig file permissions cannot be verified without node access and must be checked manually"
+    evidence: [r.status.nodeInfo.osImage]
+    remediation: chmod 644 /var/lib/kubelet/kubeconfig on the node (GKE-managed images already enforce this)
+    references:
+      - https://cloud.google.com/kubernetes-engine/docs/concepts/node-images
+    notes: |
+      This rule performs a degraded check: without node_exec (removed from the DSL), it can only
+      verify that the node runs Container-Optimized OS. COS nodes pass because Google manages the
+      kubeconfig file permissions. Non-COS nodes produce REVIEW because the file mode cannot be
+      verified without node access. Autopilot clusters have no node access and are not applicable.
+
+  - id: cis-gke-3.1.2
+    ref: "3.1.2"
+    title: Ensure that the kubelet kubeconfig file ownership is set to root:root
+    profile: L1
+    cis_assessment: automated
+    mode: contextual
+    severity: medium
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: nodes
+        kubectl: get nodes -o json
+    resource:
+      from: data.nodes.items
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: k8s.io/Node
+      name: r.metadata.name
+      key: 'r.metadata.?labels.orValue({})[?"cloud.google.com/gke-nodepool"].orValue(r.metadata.name)'
+    params:
+      managed_os_prefix: Container-Optimized OS
+    check:
+      assert: "true"
+      review_when: "!r.?status.?nodeInfo.?osImage.orValue('').startsWith(params.managed_os_prefix)"
+      message: "kubelet kubeconfig on node {{ .r.metadata.name }}: ownership cannot be verified without node access"
+      review_message: "node {{ .r.metadata.name }} does not run Container-Optimized OS; kubelet kubeconfig file ownership cannot be verified without node access and must be checked manually"
+    evidence: [r.status.nodeInfo.osImage]
+    remediation: chown root:root /var/lib/kubelet/kubeconfig on the node (GKE-managed images already enforce this)
+    references:
+      - https://cloud.google.com/kubernetes-engine/docs/concepts/cis-benchmarks
+    notes: |
+      Same strategy as 3.1.1. This rule performs a degraded check: without node_exec (removed from
+      the DSL), it can only verify that the node runs Container-Optimized OS. COS nodes pass because
+      Google manages the file ownership. Non-COS nodes produce REVIEW because the owner cannot be
+      verified without node access. Autopilot clusters have no node access and are not applicable.
+      Windows Server node pools are not supported.
+
+  - id: cis-gke-3.1.3
+    ref: "3.1.3"
+    title: Ensure that the kubelet configuration file has permissions set to 644
+    profile: L1
+    cis_assessment: automated
+    mode: contextual
+    severity: medium
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: nodes
+        kubectl: get nodes -o json
+    resource:
+      from: data.nodes.items
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: k8s.io/Node
+      name: r.metadata.name
+      key: 'r.metadata.?labels.orValue({})[?"cloud.google.com/gke-nodepool"].orValue(r.metadata.name)'
+    params:
+      managed_os_prefix: Container-Optimized OS
+    check:
+      assert: "true"
+      review_when: "!r.?status.?nodeInfo.?osImage.orValue('').startsWith(params.managed_os_prefix)"
+      message: "kubelet config file on node {{ .r.metadata.name }}: permissions cannot be verified without node access"
+      review_message: "node {{ .r.metadata.name }} does not run Container-Optimized OS; kubelet config file permissions cannot be verified without node access and must be checked manually"
+    evidence: [r.status.nodeInfo.osImage]
+    remediation: chmod 644 /home/kubernetes/kubelet-config.yaml on the node (the file passed to kubelet --config)
+    references:
+      - https://kubernetes.io/docs/tasks/administer-cluster/kubelet-config-file/
+      - https://cloud.google.com/kubernetes-engine/docs/concepts/cis-benchmarks
+    notes: |
+      This rule performs a degraded check: without node_exec (removed from the DSL), it can only
+      verify that the node runs Container-Optimized OS. COS nodes pass because Google manages the
+      kubelet config file permissions. Non-COS nodes produce REVIEW because the file mode cannot be
+      verified without node access. The CIS default for this file is 600, which passes. Autopilot
+      clusters have no node access and are not applicable. Windows Server node pools are not
+      supported.
+
+  - id: cis-gke-3.1.4
+    ref: "3.1.4"
+    title: Ensure that the kubelet configuration file ownership is set to root:root
+    profile: L1
+    cis_assessment: automated
+    mode: contextual
+    severity: medium
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: nodes
+        kubectl: get nodes -o json
+    resource:
+      from: data.nodes.items
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: k8s.io/Node
+      name: r.metadata.name
+      key: 'r.metadata.?labels.orValue({})[?"cloud.google.com/gke-nodepool"].orValue(r.metadata.name)'
+    params:
+      managed_os_prefix: Container-Optimized OS
+    check:
+      assert: "true"
+      review_when: "!r.?status.?nodeInfo.?osImage.orValue('').startsWith(params.managed_os_prefix)"
+      message: "kubelet config file on node {{ .r.metadata.name }}: ownership cannot be verified without node access"
+      review_message: "node {{ .r.metadata.name }} does not run Container-Optimized OS; kubelet config file ownership cannot be verified without node access and must be checked manually"
+    evidence: [r.status.nodeInfo.osImage]
+    remediation: chown root:root /home/kubernetes/kubelet-config.yaml on the node (the file passed to kubelet --config)
+    references:
+      - https://kubernetes.io/docs/tasks/administer-cluster/kubelet-config-file/
+      - https://cloud.google.com/kubernetes-engine/docs/concepts/cis-benchmarks
+    notes: |
+      Same strategy as 3.1.1. This rule performs a degraded check: without node_exec (removed from
+      the DSL), it can only verify that the node runs Container-Optimized OS. COS nodes pass because
+      Google manages the file ownership. Non-COS nodes produce REVIEW because the owner cannot be
+      verified without node access. The CIS default ownership is root:root. Autopilot clusters have
+      no node access and are not applicable. Windows Server node pools are not supported.

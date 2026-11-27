@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:gbench:schema:catalog:1",
+  "title": "gbench rule catalog",
+  "description": "Output of rules list --format json. The catalog carries no grouping: consumers keep their own rule groups.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "ruleset_hash", "rules"],
+  "properties": {
+    "schema_version": { "$ref": "#/$defs/schema_version" },
+    "ruleset_hash": { "$ref": "#/$defs/sha256_digest" },
+    "rules": { "type": "array", "items": { "$ref": "#/$defs/rule" } }
+  },
+  "$defs": {
+    "schema_version": { "type": "string", "pattern": "^1\\.[0-9]+$" },
+    "sha256_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nonempty_string": { "type": "string", "minLength": 1 },
+    "capability": { "type": "string", "enum": ["kubectl", "workspace-admin", "org-access"] },
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default", "type"],
+      "properties": {
+        "default": { "description": "The rule's default value, any JSON value except null." },
+        "type": {
+          "description": "JSON type inferred from the default value.",
+          "type": "string",
+          "enum": ["string", "integer", "number", "boolean", "array", "object"]
+        }
+      }
+    },
+    "param_constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pattern": { "type": "string" },
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" },
+        "enum": { "type": "array" },
+        "max_length": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "ref", "title", "benchmark", "profile", "cis_assessment", "mode", "severity", "scope",
+        "services", "requires", "params", "verification", "remediation", "references", "notes"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9](\\.[0-9]+)*$" },
+        "ref": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)*$" },
+        "title": { "$ref": "#/$defs/nonempty_string" },
+        "benchmark": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version"],
+          "properties": {
+            "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+            "version": { "$ref": "#/$defs/nonempty_string" }
+          }
+        },
+        "section": {
+          "description": "Number and title of the section named in the rule file header; absent when the header names neither.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string" },
+            "title": { "type": "string" }
+          }
+        },
+        "profile": { "type": "string", "enum": ["L1", "L2"] },
+        "cis_assessment": { "type": "string", "enum": ["automated", "manual"] },
+        "mode": { "type": "string", "enum": ["deterministic", "contextual"] },
+        "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+        "scope": { "type": "string", "enum": ["project", "organization", "cluster"] },
+        "evaluate_per": { "description": "Present exactly when scope is organization.", "type": "string", "enum": ["organization", "project"] },
+        "services": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9.-]+\\.googleapis\\.com$" } },
+        "requires": { "type": "array", "items": { "$ref": "#/$defs/capability" }, "uniqueItems": true },
+        "params": {
+          "description": "Param name to its default value and inferred type.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/param" }
+        },
+        "params_constraints": {
+          "description": "Present only when the rule declares constraints.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/param_constraint" }
+        },
+        "verification": { "type": "string", "enum": ["none", "static", "fixture", "live"] },
+        "remediation": { "$ref": "#/$defs/nonempty_string" },
+        "references": { "type": "array", "items": { "type": "string" } },
+        "notes": { "$ref": "#/$defs/nonempty_string" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["scope"], "properties": { "scope": { "const": "organization" } } },
+          "then": { "required": ["evaluate_per"] },
+          "else": { "properties": { "evaluate_per": false } }
+        }
+      ]
+    }
+  }
+}

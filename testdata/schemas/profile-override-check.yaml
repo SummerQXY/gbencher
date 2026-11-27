@@ -1,0 +1,7 @@
+dsl_version: 1
+name: example
+overrides:
+  cis-gcp-3.6:
+    params: { ports: [22] }
+    check:
+      assert: "true"

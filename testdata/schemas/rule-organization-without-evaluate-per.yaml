@@ -1,0 +1,19 @@
+dsl_version: 1
+benchmark: {id: cis-example, version: "1.0.0"}
+rules:
+  - id: cis-example-1.1
+    ref: "1.1"
+    title: Ensure an organization rule names its evaluation target
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: organization
+    requires: [org-access]
+    collect:
+      - id: policies
+        gcloud: resource-manager org-policies list --organization={{ .organization }} --format=json
+    check:
+      assert: size(data.policies) > 0
+    remediation: Declare evaluate_per.
+    notes: Fixture for schema tests.

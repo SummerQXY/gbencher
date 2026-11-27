@@ -1,0 +1,29 @@
+# Lint fixture: the only defect is a reference to the result of a step the rule does not have.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-data-ref-unknown-1
+    ref: "1.1"
+    title: Fixture that reads a step that does not exist
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: r.name
+    check:
+      assert: size(data.volumes) == 0
+      message: "Instance {{ .r.name }} exists although volumes were found"
+    remediation: Remove the instance.
+    notes: Fixture for the lint tests.

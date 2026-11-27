@@ -1,0 +1,94 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {
+    "namespaces": {
+      "apiVersion": "v1",
+      "kind": "NamespaceList",
+      "items": [
+        {
+          "apiVersion": "v1",
+          "kind": "Namespace",
+          "metadata": {
+            "name": "payments"
+          }
+        }
+      ]
+    },
+    "pods": {
+      "apiVersion": "v1",
+      "kind": "PodList",
+      "items": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "metadata": {
+            "name": "api-0",
+            "namespace": "payments",
+            "ownerReferences": [
+              {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": "api",
+                "uid": "deployment-uid",
+                "controller": true,
+                "blockOwnerDeletion": true
+              }
+            ]
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "app",
+                "image": "example.com/app:v1"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "quotas": {
+      "apiVersion": "v1",
+      "kind": "ResourceQuotaList",
+      "items": [
+        {
+          "apiVersion": "v1",
+          "kind": "ResourceQuota",
+          "metadata": {
+            "name": "tenant-quota",
+            "namespace": "payments"
+          },
+          "spec": {
+            "hard": {
+              "pods": "20"
+            }
+          }
+        }
+      ]
+    },
+    "limitranges": {
+      "apiVersion": "v1",
+      "kind": "LimitRangeList",
+      "items": []
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-4.6.1",
+      "resource_key": "projects/example-project/payments",
+      "status": "PASS"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "namespaces": "schema",
+      "pods": "schema",
+      "quotas": "schema",
+      "limitranges": "schema"
+    }
+  }
+}

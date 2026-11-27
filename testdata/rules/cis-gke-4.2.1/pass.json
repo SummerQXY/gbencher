@@ -1,0 +1,77 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {
+    "namespaces": {
+      "apiVersion": "v1",
+      "kind": "NamespaceList",
+      "items": [
+        {
+          "apiVersion": "v1",
+          "kind": "Namespace",
+          "metadata": {
+            "name": "payments",
+            "labels": {
+              "pod-security.kubernetes.io/enforce": "baseline"
+            }
+          }
+        }
+      ]
+    },
+    "pods": {
+      "apiVersion": "v1",
+      "kind": "PodList",
+      "items": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "metadata": {
+            "name": "api-0",
+            "namespace": "payments",
+            "ownerReferences": [
+              {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": "api",
+                "uid": "deployment-uid",
+                "controller": true,
+                "blockOwnerDeletion": true
+              }
+            ]
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "app",
+                "image": "example.com/app:v1"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "crds": {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinitionList",
+      "items": []
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-4.2.1",
+      "resource_key": "projects/example-project/payments",
+      "status": "PASS"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "namespaces": "schema",
+      "pods": "schema",
+      "crds": "schema"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "target": {
+    "type": "project",
+    "project_id": "example-prod"
+  },
+  "data": {},
+  "expect": [
+    {
+      "rule_id": "cis-gcp-2.13",
+      "resource_key": "projects/example-prod",
+      "status": "NOT_APPLICABLE"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "networks": "handwritten",
+      "dns_policies": "handwritten"
+    }
+  },
+  "disabled_services": [
+    "compute.googleapis.com"
+  ]
+}

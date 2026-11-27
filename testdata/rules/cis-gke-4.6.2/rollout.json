@@ -1,0 +1,138 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {
+    "pods": {
+      "apiVersion": "v1",
+      "kind": "PodList",
+      "items": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "metadata": {
+            "name": "api-old",
+            "namespace": "payments",
+            "ownerReferences": [
+              {
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "name": "api-old-rs",
+                "uid": "api-old-rs-uid",
+                "controller": true,
+                "blockOwnerDeletion": true
+              }
+            ]
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "app",
+                "image": "example.com/app:v1",
+                "securityContext": {
+                  "seccompProfile": {
+                    "type": "RuntimeDefault"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "metadata": {
+            "name": "api-new",
+            "namespace": "payments",
+            "ownerReferences": [
+              {
+                "apiVersion": "apps/v1",
+                "kind": "ReplicaSet",
+                "name": "api-new-rs",
+                "uid": "api-new-rs-uid",
+                "controller": true,
+                "blockOwnerDeletion": true
+              }
+            ]
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "app",
+                "image": "example.com/app:v1",
+                "securityContext": {
+                  "seccompProfile": {
+                    "type": "RuntimeDefault"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "replicasets": {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSetList",
+      "items": [
+        {
+          "apiVersion": "apps/v1",
+          "kind": "ReplicaSet",
+          "metadata": {
+            "name": "api-old-rs",
+            "namespace": "payments",
+            "ownerReferences": [
+              {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": "api",
+                "uid": "deployment-uid",
+                "controller": true,
+                "blockOwnerDeletion": true
+              }
+            ]
+          }
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "ReplicaSet",
+          "metadata": {
+            "name": "api-new-rs",
+            "namespace": "payments",
+            "ownerReferences": [
+              {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": "api",
+                "uid": "deployment-uid",
+                "controller": true,
+                "blockOwnerDeletion": true
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-4.6.2",
+      "resource_key": "payments/Deployment/api",
+      "status": "PASS"
+    },
+    {
+      "rule_id": "cis-gke-4.6.2",
+      "resource_key": "payments/Deployment/api",
+      "status": "PASS"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "pods": "schema",
+      "replicasets": "schema"
+    }
+  }
+}

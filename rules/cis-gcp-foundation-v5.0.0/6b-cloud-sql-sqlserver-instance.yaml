@@ -1,0 +1,506 @@
+dsl_version: 1
+benchmark:
+  id: cis-gcp-foundation
+  version: "5.0.0"
+  section: "6"
+  title: Cloud SQL Database Services (SQL Server flags and instance settings)
+rules:
+  - id: cis-gcp-6.3.1
+    ref: "6.3.1"
+    title: Ensure 'external scripts enabled' Database Flag for Cloud SQL SQL Server Instance Is Set to 'off'
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?databaseVersion.orValue("").startsWith("SQLSERVER")
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: external scripts enabled
+      expected: "off"
+    check:
+      assert: |
+        !r.settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag && f.value != params.expected)
+      message: "Instance {{ .r.name }} sets '{{ .params.flag }}' to a value other than {{ .params.expected }}"
+    evidence: [r.settings.databaseFlags]
+    remediation: gcloud sql instances patch <INSTANCE> --database-flags="external scripts enabled"=off
+    references:
+      - https://cloud.google.com/sql/docs/sqlserver/flags
+    notes: |
+      The CIS default value for this flag is off, so an absent flag is compliant; only an explicit
+      non-off value fails. Flags whose default is non-compliant must require explicit presence instead.
+
+  - id: cis-gcp-6.3.2
+    ref: "6.3.2"
+    title: Ensure 'cross db ownership chaining' Database Flag for Cloud SQL SQL Server Instance Is Set to 'off'
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?databaseVersion.orValue("").startsWith("SQLSERVER")
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: cross db ownership chaining
+      expected: "off"
+    check:
+      assert: |
+        !r.settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag && f.?value.orValue("") != params.expected)
+      message: "Instance {{ .r.name }} sets '{{ .params.flag }}' to a value other than {{ .params.expected }}"
+    evidence:
+      - 'r.settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags="cross db ownership chaining"=off
+      (or omit the flag; --database-flags replaces the whole flag list, so include every flag to keep)
+    references:
+      - https://cloud.google.com/sql/docs/sqlserver/flags
+      - https://docs.microsoft.com/en-us/sql/database-engine/configure-windows/cross-db-ownership-chaining-server-configuration-option?view=sql-server-ver15
+    notes: |
+      The SQL Server default is off and Cloud SQL no longer accepts on for this deprecated flag, so an
+      absent flag passes and only an explicit value other than off fails. Removing the flag and setting
+      it to off are both compliant, as the CIS audit allows.
+
+  - id: cis-gcp-6.3.3
+    ref: "6.3.3"
+    title: Ensure 'user Connections' Database Flag for Cloud SQL SQL Server Instance Is Set to a Non-limiting Value
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?databaseVersion.orValue("").startsWith("SQLSERVER")
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: user connections
+      non_limiting_values: ["0", "32767"]
+    check:
+      assert: |
+        !r.settings.?databaseFlags.orValue([]).exists(f,
+          f.name == params.flag && !(f.?value.orValue("") in params.non_limiting_values))
+      message: "Instance {{ .r.name }} sets '{{ .params.flag }}' to a limiting value (expected unset or one of {{ .params.non_limiting_values }})"
+    evidence:
+      - 'r.settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags="user connections"=0
+      (or omit the flag; --database-flags replaces the whole flag list, so include every flag to keep)
+    references:
+      - https://cloud.google.com/sql/docs/sqlserver/flags
+      - https://docs.microsoft.com/en-us/sql/database-engine/configure-windows/configure-the-user-connections-server-configuration-option?view=sql-server-ver15
+    notes: |
+      The default 0 lets SQL Server allocate connections up to the 32,767 maximum, so an absent flag
+      passes. CIS audits for 0; 32767 is also accepted because it equals the engine maximum and therefore
+      does not limit connections. Any other explicit value fails. The CIS remediation mentions an
+      organization-recommended value: an instance that caps connections on purpose should get a profile
+      exemption rather than a change to non_limiting_values.
+
+  - id: cis-gcp-6.3.4
+    ref: "6.3.4"
+    title: Ensure 'user options' Database Flag for Cloud SQL SQL Server Instance Is Not Configured
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?databaseVersion.orValue("").startsWith("SQLSERVER")
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: user options
+    check:
+      assert: |
+        !r.settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag)
+      message: "Instance {{ .r.name }} configures the '{{ .params.flag }}' flag, which must not be set"
+    evidence:
+      - 'r.settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=<FLAG1>=<VALUE1>,<FLAG2>=<VALUE2>
+      (list every flag to keep except "user options"), or reset all flags with
+      gcloud sql instances patch <INSTANCE> --clear-database-flags
+    references:
+      - https://cloud.google.com/sql/docs/sqlserver/flags
+      - https://docs.microsoft.com/en-us/sql/database-engine/configure-windows/configure-the-user-options-server-configuration-option?view=sql-server-ver15
+    notes: |
+      The default is not configured and the CIS audit expects the jq query to return nothing, so the rule
+      fails whenever a 'user options' entry exists, whatever its value (including 0). An absent flag passes.
+
+  - id: cis-gcp-6.3.5
+    ref: "6.3.5"
+    title: Ensure 'remote access' Database Flag for Cloud SQL SQL Server Instance Is Set to 'off'
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?databaseVersion.orValue("").startsWith("SQLSERVER")
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: remote access
+      expected: "off"
+    check:
+      assert: |
+        r.settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag && f.?value.orValue("") == params.expected)
+      message: "Instance {{ .r.name }} does not explicitly set '{{ .params.flag }}' to {{ .params.expected }} (the SQL Server default is on)"
+    evidence:
+      - 'r.settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags="remote access"=off
+      (--database-flags replaces the whole flag list, so include every flag to keep; the instance restarts)
+    references:
+      - https://cloud.google.com/sql/docs/sqlserver/flags
+      - https://docs.microsoft.com/en-us/sql/database-engine/configure-windows/configure-the-remote-access-server-configuration-option?view=sql-server-ver15
+    notes: |
+      The SQL Server default for remote access is on, which is non-compliant, so an absent flag fails: the
+      rule requires an explicit 'remote access' entry set to off.
+
+  - id: cis-gcp-6.3.6
+    ref: "6.3.6"
+    title: Ensure '3625 (trace flag)' Database Flag for all Cloud SQL SQL Server Instances Is Set to 'on'
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?databaseVersion.orValue("").startsWith("SQLSERVER")
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: "3625"
+      expected: "on"
+    check:
+      assert: |
+        r.settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag && f.?value.orValue("") == params.expected)
+      message: "Instance {{ .r.name }} does not set trace flag '{{ .params.flag }}' to {{ .params.expected }}"
+    evidence:
+      - 'r.settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags=3625=on
+      (--database-flags replaces the whole flag list, so include every flag to keep; the instance restarts)
+    references:
+      - https://cloud.google.com/sql/docs/sqlserver/flags
+      - https://docs.microsoft.com/en-us/sql/t-sql/database-console-commands/dbcc-traceon-trace-flags-transact-sql?view=sql-server-ver15#trace-flags
+    notes: |
+      Trace flag 3625 is off by default, which is non-compliant, so an absent flag fails: the rule
+      requires an explicit '3625' entry set to on.
+
+  - id: cis-gcp-6.3.7
+    ref: "6.3.7"
+    title: Ensure 'contained database authentication' Database Flag for Cloud SQL SQL Server Instance Is Set to 'off'
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?databaseVersion.orValue("").startsWith("SQLSERVER")
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      flag: contained database authentication
+      expected: "off"
+    check:
+      assert: |
+        !r.settings.?databaseFlags.orValue([]).exists(f, f.name == params.flag && f.?value.orValue("") != params.expected)
+      message: "Instance {{ .r.name }} sets '{{ .params.flag }}' to a value other than {{ .params.expected }}"
+    evidence:
+      - 'r.settings.?databaseFlags.orValue([]).filter(f, f.name == params.flag)'
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --database-flags="contained database authentication"=off
+      (or omit the flag; --database-flags replaces the whole flag list, so include every flag to keep)
+    references:
+      - https://cloud.google.com/sql/docs/sqlserver/flags
+      - https://docs.microsoft.com/en-us/sql/database-engine/configure-windows/contained-database-authentication-server-configuration-option?view=sql-server-ver15
+      - https://docs.microsoft.com/en-us/sql/relational-databases/databases/security-best-practices-with-contained-databases?view=sql-server-ver15
+    notes: |
+      The CIS text has no Default Value section; the SQL Server default is off and the CIS audit only
+      checks the value when the flag is present. An absent flag therefore passes and only an explicit
+      value other than off fails.
+
+  - id: cis-gcp-6.4
+    ref: "6.4"
+    title: Ensure That the Cloud SQL Database Instance Requires All Incoming Connections To Use SSL
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    check:
+      assert: |
+        r.settings.?ipConfiguration.?sslMode.orValue("SSL_MODE_UNSPECIFIED") in ["ENCRYPTED_ONLY", "TRUSTED_CLIENT_CERTIFICATE_REQUIRED"]
+        || (r.settings.?ipConfiguration.?sslMode.orValue("SSL_MODE_UNSPECIFIED") == "SSL_MODE_UNSPECIFIED"
+            && r.settings.?ipConfiguration.?requireSsl.orValue(false))
+      message: "Instance {{ .r.name }} accepts unencrypted connections: sslMode is not ENCRYPTED_ONLY or TRUSTED_CLIENT_CERTIFICATE_REQUIRED"
+    evidence: [r.databaseVersion, r.settings.ipConfiguration.sslMode, r.settings.ipConfiguration.requireSsl]
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --ssl-mode=ENCRYPTED_ONLY
+      (MySQL and PostgreSQL can use --ssl-mode=TRUSTED_CLIENT_CERTIFICATE_REQUIRED and distribute client certificates)
+    references:
+      - https://cloud.google.com/sql/docs/postgres/configure-ssl-instance/
+      - https://docs.cloud.google.com/sql/docs/mysql/authorize-ssl
+      - https://docs.cloud.google.com/sql/docs/mysql/configure-ssl-instance#console
+    notes: |
+      Applies to every engine and to every instance type except on-premises source representation
+      instances, which do not accept client connections. The sqladmin API gives sslMode priority over the
+      legacy requireSsl field, so an instance passes when sslMode is ENCRYPTED_ONLY or
+      TRUSTED_CLIENT_CERTIFICATE_REQUIRED; requireSsl=true is honoured only when sslMode is absent or
+      SSL_MODE_UNSPECIFIED (legacy configurations). An absent sslMode is treated as
+      ALLOW_UNENCRYPTED_AND_ENCRYPTED, the CIS default. Private-only instances without authorized networks
+      still fail, as in CIS, because networks added later would not enforce SSL. Enforcing the Cloud SQL
+      connectors through settings.connectorEnforcement is not credited.
+
+  - id: cis-gcp-6.5
+    ref: "6.5"
+    title: Ensure That Cloud SQL Database Instances Do Not Implicitly Whitelist All Public IP Addresses
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    check:
+      assert: |
+        !r.settings.?ipConfiguration.?authorizedNetworks.orValue([]).exists(n, has(n.value) && cidrIsPublic(n.value))
+      message: "Instance {{ .r.name }} has an authorized network that allows every address (0.0.0.0/0)"
+    evidence: [r.settings.ipConfiguration.authorizedNetworks, r.settings.ipConfiguration.ipv4Enabled]
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --authorized-networks=<TRUSTED_CIDR_1>,<TRUSTED_CIDR_2>
+      (the list replaces the existing one; --clear-authorized-networks removes all entries)
+    references:
+      - https://cloud.google.com/sql/docs/mysql/configure-ip
+      - https://cloud.google.com/sql/docs/mysql/connection-org-policy
+      - https://cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints
+    notes: |
+      Fails when any settings.ipConfiguration.authorizedNetworks value satisfies cidrIsPublic
+      (0.0.0.0/0, ::/0 or any /0 prefix). Like the CIS audit, the rule does not depend on whether public
+      IP is enabled (6.7 covers public IP), so a dormant 0.0.0.0/0 entry still fails. Limitation: broad
+      ranges that are not /0, such as 0.0.0.0/1 plus 128.0.0.0/1, are not detected. Prevention: the
+      constraints/sql.restrictAuthorizedNetworks organization policy.
+
+  - id: cis-gcp-6.6
+    ref: "6.6"
+    title: Ensure Cloud SQL Database Instances Have IAM Database Authentication Enabled
+    profile: L1
+    cis_assessment: manual
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: |
+        r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"
+        && (r.?databaseVersion.orValue("").startsWith("MYSQL") || r.?databaseVersion.orValue("").startsWith("POSTGRES"))
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      mysql_flag: cloudsql_iam_authentication
+      postgres_flag: cloudsql.iam_authentication
+    check:
+      assert: |
+        r.settings.?databaseFlags.orValue([]).exists(f,
+          f.name == (r.databaseVersion.startsWith("POSTGRES") ? params.postgres_flag : params.mysql_flag)
+          && f.?value.orValue("") == "on")
+      message: "Instance {{ .r.name }} ({{ .r.databaseVersion }}) does not set its IAM database authentication flag to on"
+    evidence:
+      - r.databaseVersion
+      - 'r.settings.?databaseFlags.orValue([]).filter(f, f.name in [params.mysql_flag, params.postgres_flag])'
+    remediation: |
+      PostgreSQL: gcloud sql instances patch <INSTANCE> --database-flags=cloudsql.iam_authentication=on
+      MySQL: gcloud sql instances patch <INSTANCE> --database-flags=cloudsql_iam_authentication=on
+      (--database-flags replaces the whole flag list, so include every flag to keep), then add IAM users:
+      gcloud sql users create <EMAIL> --instance=<INSTANCE> --type=CLOUD_IAM_USER
+    references:
+      - https://cloud.google.com/sql/docs/postgres/iam-authentication
+      - https://cloud.google.com/sql/docs/mysql/iam-authentication
+    notes: |
+      CIS marks this Manual, but its audit is a deterministic flag check. The flag name depends on the
+      engine: PostgreSQL uses cloudsql.iam_authentication and MySQL uses cloudsql_iam_authentication. The
+      default is off, so the flag must be explicitly on. SQL Server is filtered out because it does not
+      support IAM database authentication; on-premises source representation instances are excluded; read
+      replicas are evaluated because CIS audits every MySQL and PostgreSQL instance. Not covered: whether
+      IAM database users exist and whether password users remain, which CIS lists as remediation steps
+      rather than audit steps. The CIS text has no References section; the links are the product docs.
+
+  - id: cis-gcp-6.7
+    ref: "6.7"
+    title: Ensure That Cloud SQL Database Instances Do Not Have Public IPs
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      allowed_instance_patterns: []
+    check:
+      assert: |
+        params.allowed_instance_patterns.exists(p, r.name.matches(p))
+        || (
+          !r.settings.?ipConfiguration.?ipv4Enabled.orValue(true)
+          && !r.?ipAddresses.orValue([]).exists(a, a.?type.orValue("") in ["PRIMARY", "MIGRATED_1ST_GEN"])
+        )
+      message: "Instance {{ .r.name }} has a public IP address (ipv4Enabled is not false or a PRIMARY address is assigned)"
+    evidence: [r.instanceType, r.settings.ipConfiguration.ipv4Enabled, r.ipAddresses]
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --network=<VPC_NETWORK> --no-assign-ip
+      (set up private services access or Private Service Connect first)
+    references:
+      - https://cloud.google.com/sql/docs/mysql/configure-private-ip
+      - https://cloud.google.com/sql/docs/mysql/private-ip
+      - https://cloud.google.com/resource-manager/docs/organization-policy/org-policy-constraints
+    notes: |
+      Fails when settings.ipConfiguration.ipv4Enabled is not explicitly false (absent is treated as public,
+      the CIS default) or when ipAddresses contains a PRIMARY (public) or MIGRATED_1ST_GEN (public
+      first-generation) address. A PRIVATE address is not required, so instances reachable only through
+      Private Service Connect pass. Unlike the CIS audit, read replicas and read pools are evaluated too: a
+      replica holding a PRIMARY address has a public endpoint whatever its origin, and a replica of a
+      private primary passes. On-premises source representation instances are excluded.
+      allowed_instance_patterns (RE2 matched against the instance name, empty by default) accepts known
+      public instances; prefer profile exemptions when an exception needs a reason and an expiry.
+
+  - id: cis-gcp-6.8
+    ref: "6.8"
+    title: Ensure That Cloud SQL Database Instances Are Configured With Automated Backups
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?instanceType.orValue("CLOUD_SQL_INSTANCE") == "CLOUD_SQL_INSTANCE"
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    params:
+      require_point_in_time_recovery: false
+    check:
+      assert: |
+        (r.settings.?backupConfiguration.?enabled.orValue(false)
+          || r.settings.?backupConfiguration.?backupTier.orValue("") == "ENHANCED")
+        && (!params.require_point_in_time_recovery
+          || r.settings.?backupConfiguration.?pointInTimeRecoveryEnabled.orValue(false)
+          || r.settings.?backupConfiguration.?binaryLogEnabled.orValue(false))
+      message: "Instance {{ .r.name }} does not have automated backups (or the required point-in-time recovery) enabled"
+    evidence: [r.databaseVersion, r.settings.backupConfiguration]
+    remediation: |
+      gcloud sql instances patch <INSTANCE> --backup-start-time=<HH:MM>
+      For point-in-time recovery also pass --enable-point-in-time-recovery (PostgreSQL, SQL Server) or --enable-bin-log (MySQL).
+    references:
+      - https://cloud.google.com/sql/docs/mysql/backup-recovery/backups
+      - https://cloud.google.com/sql/docs/postgres/backup-recovery/backups
+      - https://cloud.google.com/sql/docs/sqlserver/backup-recovery/backups
+    notes: |
+      The population is primary instances (instanceType CLOUD_SQL_INSTANCE), matching the CIS jq filter:
+      read replicas and read pools cannot have automated backups, and on-premises source representation
+      instances are not backed up by Cloud SQL. Backups are off by default, so absence fails. An instance
+      passes when settings.backupConfiguration.enabled is true or backupTier is ENHANCED (backups scheduled
+      by a Backup and DR backup plan). CIS does not require point-in-time recovery; set
+      require_point_in_time_recovery=true to also require pointInTimeRecoveryEnabled (PostgreSQL, SQL
+      Server) or binaryLogEnabled (MySQL). The backup window (startTime) is reported in evidence.
+
+  - id: cis-gcp-6.9
+    ref: "6.9"
+    title: Ensure Cloud SQL Database Instances Have Deletion Protection Enabled
+    profile: L1
+    cis_assessment: manual
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [sqladmin.googleapis.com]
+    collect:
+      - id: sql_instances
+        gcloud: sql instances list --project={{ .project }} --format=json
+    resource:
+      from: data.sql_instances
+      filter: r.?instanceType.orValue("") != "ON_PREMISES_INSTANCE"
+      kind: sqladmin.googleapis.com/Instance
+      name: r.name
+    check:
+      assert: r.settings.?deletionProtectionEnabled.orValue(false) == true
+      message: "Instance {{ .r.name }} does not have deletion protection enabled"
+    evidence: [r.instanceType, r.settings.deletionProtectionEnabled]
+    remediation: gcloud sql instances patch <INSTANCE> --deletion-protection
+    references:
+      - https://cloud.google.com/sql/docs/mysql/deletion-protection
+    notes: |
+      CIS marks this Manual, but its audit is a single field check, so the rule is deterministic.
+      Deletion protection is off by default, so an absent or false settings.deletionProtectionEnabled
+      fails. Every instance type is evaluated, including read replicas and read pools, because the CIS
+      audit covers all instances; on-premises source representation instances are excluded. The CIS text
+      has no References section; the link is the product doc.

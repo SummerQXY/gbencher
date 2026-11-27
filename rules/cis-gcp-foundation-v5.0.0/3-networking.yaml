@@ -1,0 +1,627 @@
+dsl_version: 1
+benchmark:
+  id: cis-gcp-foundation
+  version: "5.0.0"
+  section: "3"
+  title: Networking
+rules:
+  - id: cis-gcp-3.1
+    ref: "3.1"
+    title: Ensure That the Default Network Does Not Exist in a Project
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: networks
+        gcloud: compute networks list --project={{ .project }} --format=json
+    resource:
+      from: data.networks
+      kind: compute.googleapis.com/Network
+      name: r.name
+      empty: pass
+    check:
+      assert: r.name != "default"
+      message: "Project {{ .project }} has a VPC network named default"
+    evidence:
+      - r.x_gcloud_subnet_mode
+      - size(r.?subnetworks.orValue([]))
+    remediation: |
+      Migrate workloads to a custom-mode network and delete the default-allow-* firewall rules, then:
+      gcloud compute networks delete default --project=<PROJECT_ID>
+      Prevent re-creation with the organization policy constraint compute.skipDefaultNetworkCreation.
+    references:
+      - https://cloud.google.com/vpc/docs/vpc#default-network
+      - https://cloud.google.com/compute/docs/networking#firewall_rules
+      - https://cloud.google.com/sdk/gcloud/reference/compute/networks/delete
+    notes: |
+      Mirrors the CIS audit: every VPC network in the project is evaluated and the one named "default"
+      fails; a project without networks passes. As in CIS only the name is checked, so a renamed
+      auto-mode network is not flagged; the permissive default-allow-* firewall rules it ships with are
+      covered by 3.6 and 3.7. The compute.skipDefaultNetworkCreation organization policy stops new
+      projects from getting a default network but does not remove existing ones.
+
+  - id: cis-gcp-3.2
+    ref: "3.2"
+    title: Ensure Legacy Networks Do Not Exist for Older Projects
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: networks
+        gcloud: compute networks list --project={{ .project }} --format=json
+    resource:
+      from: data.networks
+      kind: compute.googleapis.com/Network
+      name: r.name
+      empty: pass
+    check:
+      assert: |
+        !has(r.IPv4Range) && r.?x_gcloud_subnet_mode.orValue("") != "LEGACY"
+      message: "Network {{ .r.name }} is a legacy network (single range {{ .r.IPv4Range }}, no subnetworks)"
+    evidence: [r.IPv4Range, r.gatewayIPv4, r.x_gcloud_subnet_mode]
+    remediation: |
+      gcloud compute networks create <NEW_NETWORK_NAME> --subnet-mode=custom --project=<PROJECT_ID>
+      then create subnets, migrate instances, firewall rules, routes and VPN/Interconnect, and run:
+      gcloud compute networks delete <LEGACY_NETWORK_NAME> --project=<PROJECT_ID>
+    references:
+      - https://cloud.google.com/vpc/docs/using-legacy#creating_a_legacy_network
+      - https://cloud.google.com/vpc/docs/using-legacy#deleting_a_legacy_network
+    notes: |
+      A legacy network is identified by the network-wide REST field IPv4Range, which only legacy
+      networks carry, or by the gcloud-computed x_gcloud_subnet_mode LEGACY; either signal fails.
+      Legacy networks cannot be converted in place, so remediation is a migration to a new custom or
+      auto mode network. The default is compliant (legacy networks can no longer be created), and a
+      project without networks passes.
+
+  - id: cis-gcp-3.3
+    ref: "3.3"
+    title: Ensure That DNSSEC Is Enabled for Cloud DNS
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [dns.googleapis.com]
+    collect:
+      - id: zones
+        gcloud: dns managed-zones list --project={{ .project }} --format=json
+    resource:
+      from: data.zones
+      filter: r.?visibility.orValue("public") == "public"
+      kind: dns.googleapis.com/ManagedZone
+      name: r.name
+    check:
+      assert: r.?dnssecConfig.?state.orValue("off") == "on"
+      message: "Public zone {{ .r.name }} ({{ .r.dnsName }}) does not have DNSSEC on"
+    evidence: [r.dnsName, r.dnssecConfig]
+    remediation: |
+      gcloud dns managed-zones update <ZONE_NAME> --dnssec-state on --project=<PROJECT_ID>
+      then publish the zone's DS record at the domain registrar.
+    references:
+      - https://cloud.google.com/dns/dnssec-config#enabling
+      - https://cloud.google.com/dns/dnssec
+    notes: |
+      Mirrors the CIS audit for every zone with visibility public; private zones (including
+      forwarding, peering and reverse lookup zones) do not support DNSSEC and are filtered out.
+      DNSSEC is off by default, so a missing dnssecConfig fails, and the transitional "transfer" state
+      also fails until the zone is switched to "on" (exempt the zone while a transfer is in progress).
+      Whether the DS record is published at the parent zone is not observable through the Cloud DNS API.
+
+  - id: cis-gcp-3.4
+    ref: "3.4"
+    title: Ensure That RSASHA1 Is Not Used for the Key-Signing Key in Cloud DNS DNSSEC
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [dns.googleapis.com]
+    collect:
+      - id: zones
+        gcloud: dns managed-zones list --project={{ .project }} --format=json
+    resource:
+      from: data.zones
+      filter: r.?visibility.orValue("public") == "public"
+      kind: dns.googleapis.com/ManagedZone
+      name: r.name
+    check:
+      assert: |
+        !r.?dnssecConfig.?defaultKeySpecs.orValue([]).exists(k,
+          k.?keyType.orValue("") == "keySigning"
+          && k.?algorithm.orValue("").lowerAscii() == "rsasha1")
+      message: "Public zone {{ .r.name }} uses RSASHA1 for its DNSSEC key-signing key"
+    evidence: [r.dnssecConfig.state, r.dnssecConfig.defaultKeySpecs]
+    remediation: |
+      Remove the zone's DS record at the registrar, then:
+      gcloud dns managed-zones update <ZONE_NAME> --dnssec-state off
+      gcloud dns managed-zones update <ZONE_NAME> --dnssec-state on --ksk-algorithm <KSK_ALGORITHM> --ksk-key-length <KSK_KEY_LENGTH> --zsk-algorithm <ZSK_ALGORITHM> --zsk-key-length <ZSK_KEY_LENGTH> --denial-of-existence <DENIAL_OF_EXISTENCE>
+      and publish the new DS record.
+    references:
+      - https://cloud.google.com/dns/dnssec-advanced#advanced_signing_options
+    notes: |
+      Evaluates the keySigning entry of dnssecConfig.defaultKeySpecs on every public zone, as the CIS
+      audit does, regardless of the DNSSEC state. A zone with DNSSEC off and no key specs therefore
+      passes vacuously; 3.3 reports it. Algorithm names are compared case-insensitively. Key length is
+      not evaluated, as in CIS.
+
+  - id: cis-gcp-3.5
+    ref: "3.5"
+    title: Ensure That RSASHA1 Is Not Used for the Zone-Signing Key in Cloud DNS DNSSEC
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [dns.googleapis.com]
+    collect:
+      - id: zones
+        gcloud: dns managed-zones list --project={{ .project }} --format=json
+    resource:
+      from: data.zones
+      filter: r.?visibility.orValue("public") == "public"
+      kind: dns.googleapis.com/ManagedZone
+      name: r.name
+    check:
+      assert: |
+        !r.?dnssecConfig.?defaultKeySpecs.orValue([]).exists(k,
+          k.?keyType.orValue("") == "zoneSigning"
+          && k.?algorithm.orValue("").lowerAscii() == "rsasha1")
+      message: "Public zone {{ .r.name }} uses RSASHA1 for its DNSSEC zone-signing key"
+    evidence: [r.dnssecConfig.state, r.dnssecConfig.defaultKeySpecs]
+    remediation: |
+      Remove the zone's DS record at the registrar, then:
+      gcloud dns managed-zones update <ZONE_NAME> --dnssec-state off
+      gcloud dns managed-zones update <ZONE_NAME> --dnssec-state on --ksk-algorithm <KSK_ALGORITHM> --ksk-key-length <KSK_KEY_LENGTH> --zsk-algorithm <ZSK_ALGORITHM> --zsk-key-length <ZSK_KEY_LENGTH> --denial-of-existence <DENIAL_OF_EXISTENCE>
+      and publish the new DS record.
+    references:
+      - https://cloud.google.com/dns/dnssec-advanced#advanced_signing_options
+    notes: |
+      Evaluates the zoneSigning entry of dnssecConfig.defaultKeySpecs on every public zone, as the CIS
+      audit does, regardless of the DNSSEC state. A zone with DNSSEC off and no key specs therefore
+      passes vacuously; 3.3 reports it. Algorithm names are compared case-insensitively. Key length is
+      not evaluated, as in CIS.
+
+  - id: cis-gcp-3.6
+    ref: "3.6"
+    title: Ensure That SSH Access Is Restricted From the Internet
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: firewalls
+        gcloud: compute firewall-rules list --project={{ .project }} --format=json
+    resource:
+      from: data.firewalls
+      kind: compute.googleapis.com/Firewall
+      name: r.name
+      empty: pass
+    params:
+      ports: [22]
+      public_ranges: ["0.0.0.0/0", "::/0"]
+    check:
+      assert: |
+        !(
+          r.direction == "INGRESS"
+          && !r.?disabled.orValue(false)
+          && r.?sourceRanges.orValue([]).exists(s, s in params.public_ranges)
+          && r.?allowed.orValue([]).exists(a,
+               a.IPProtocol in ["tcp", "all"]
+               && (!has(a.ports) || a.ports.exists(p, params.ports.exists(port, portRangeContains(p, port)))))
+        )
+      message: "Firewall rule {{ .r.name }} allows TCP port(s) {{ .params.ports }} from {{ .r.sourceRanges }}"
+    evidence: [r.sourceRanges, r.allowed, r.targetTags, r.network]
+    remediation: |
+      gcloud compute firewall-rules update <RULE> --source-ranges=<TRUSTED_CIDRS>
+      or delete the rule: gcloud compute firewall-rules delete <RULE>
+    references:
+      - https://cloud.google.com/vpc/docs/using-firewalls
+    notes: |
+      Mirrors the CIS audit: INGRESS + 0.0.0.0/0 + tcp/all + port 22 (or no port restriction).
+      Disabled rules are ignored. ::/0 is added to the default public ranges.
+      Rules that allow the port only to specific target tags still fail, as in CIS.
+
+  - id: cis-gcp-3.7
+    ref: "3.7"
+    title: Ensure That RDP Access Is Restricted From the Internet
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: firewalls
+        gcloud: compute firewall-rules list --project={{ .project }} --format=json
+    resource:
+      from: data.firewalls
+      kind: compute.googleapis.com/Firewall
+      name: r.name
+      empty: pass
+    params:
+      ports: [3389]
+      public_ranges: ["0.0.0.0/0", "::/0"]
+    check:
+      assert: |
+        !(
+          r.direction == "INGRESS"
+          && !r.?disabled.orValue(false)
+          && r.?sourceRanges.orValue([]).exists(s, s in params.public_ranges)
+          && r.?allowed.orValue([]).exists(a,
+               a.IPProtocol in ["tcp", "all"]
+               && (!has(a.ports) || a.ports.exists(p, params.ports.exists(port, portRangeContains(p, port)))))
+        )
+      message: "Firewall rule {{ .r.name }} allows TCP port(s) {{ .params.ports }} from {{ .r.sourceRanges }}"
+    evidence: [r.sourceRanges, r.allowed, r.targetTags, r.network]
+    remediation: |
+      gcloud compute firewall-rules update <RULE> --source-ranges=<TRUSTED_CIDRS>
+      or delete the rule: gcloud compute firewall-rules delete <RULE>
+    references:
+      - https://cloud.google.com/vpc/docs/firewalls#blockedtraffic
+      - https://cloud.google.com/blog/products/identity-security/cloud-iap-enables-context-aware-access-to-vms-via-ssh-and-rdp-without-bastion-hosts
+    notes: |
+      Same logic as 3.6 with port 3389. Mirrors the CIS audit: INGRESS + 0.0.0.0/0 + tcp/all + port 3389
+      (or no port restriction). Disabled rules are ignored. ::/0 is added to the default public ranges.
+      Rules that allow the port only to specific target tags still fail, as in CIS. UDP 3389 (the RDP
+      UDP transport) is not evaluated, as in CIS.
+
+  - id: cis-gcp-3.8
+    ref: "3.8"
+    title: Ensure VPC Service Controls Is Enabled for Supported Google Cloud Services
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: organization
+    evaluate_per: project
+    requires: [org-access]
+    collect:
+      - id: policies
+        gcloud: access-context-manager policies list --organization={{ .organization }} --format=json
+        on_error: empty
+      - id: perimeters
+        foreach: data.policies
+        as: policy
+        attach: perimeters
+        gcloud: access-context-manager perimeters list --policy={{ .policy.name }} --format=json
+    params:
+      required_services:
+        - storage.googleapis.com
+        - bigquery.googleapis.com
+    check:
+      assert: |
+        data.policies.exists(p,
+          p.?perimeters.orValue([]).exists(sp,
+            sp.?perimeterType.orValue("PERIMETER_TYPE_REGULAR") != "PERIMETER_TYPE_BRIDGE"
+            && ("projects/" + ctx.project_number) in sp.?status.?resources.orValue([])
+            && params.required_services.all(svc,
+                 svc in sp.?status.?restrictedServices.orValue([]))))
+      message: "Project {{ .project }} (projects/{{ .project_number }}) is not in an enforced regular VPC Service Controls perimeter that restricts {{ .params.required_services }}"
+    evidence:
+      - data.policies.map(p, p.name)
+      - |
+        data.perimeters.flatten()
+          .filter(sp, ("projects/" + ctx.project_number) in sp.?status.?resources.orValue([]))
+          .map(sp, {"perimeter": sp.name, "restrictedServices": sp.?status.?restrictedServices.orValue([])})
+      - |
+        data.perimeters.flatten()
+          .filter(sp, ("projects/" + ctx.project_number) in sp.?spec.?resources.orValue([]))
+          .map(sp, sp.name)
+    remediation: |
+      gcloud access-context-manager perimeters create <PERIMETER_NAME> --policy=<POLICY_ID> --title="<TITLE>" --perimeter-type=regular --resources=projects/<PROJECT_NUMBER> --restricted-services=storage.googleapis.com,bigquery.googleapis.com
+      or add the project to an existing perimeter:
+      gcloud access-context-manager perimeters update <PERIMETER_NAME> --policy=<POLICY_ID> --add-resources=projects/<PROJECT_NUMBER> --add-restricted-services=<SERVICES>
+      Validate with "gcloud access-context-manager perimeters dry-run create" and "dry-run enforce" first.
+    references:
+      - https://cloud.google.com/vpc-service-controls/docs/overview
+    notes: |
+      CIS marks this Manual because which projects and services need a perimeter is an organization
+      decision. Access policies and perimeters are organization resources, so the rule runs at
+      organization scope (SKIPPED when the project has no organization or org-level read access is
+      missing), but it answers whether the scanned project is protected: at organization scope
+      ctx.project_number is still the number of the target project, so when several projects of one
+      organization are scanned the collection is shared and the verdict is per project. Perimeters of
+      every access policy under the organization, including scoped policies, are collected. The project
+      passes when an enforced (status, not the dry-run spec) regular perimeter lists
+      projects/<number> and restricts every service in required_services. Tune required_services to the
+      services that hold sensitive data (for example add sqladmin.googleapis.com or
+      bigtable.googleapis.com), or set it to [] to require perimeter membership only; exempt projects
+      that hold no sensitive data. Following CIS audit step 1, an Access Context Manager API that is not
+      enabled means no policy exists (on_error: empty), so the API is not listed in services. Projects
+      that appear only in a dry-run spec fail and are listed in the evidence. Access levels and
+      ingress/egress rules are not evaluated.
+
+  - id: cis-gcp-3.9
+    ref: "3.9"
+    title: Ensure Private Service Connect is Used for Access to Google APIs
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: forwarding_rules
+        gcloud: compute forwarding-rules list --project={{ .project }} --format=json
+      - id: networks
+        gcloud: compute networks list --project={{ .project }} --format=json
+      - id: subnets
+        gcloud: compute networks subnets list --project={{ .project }} --format=json
+    resource:
+      from: data.networks
+      filter: size(r.?subnetworks.orValue([])) > 0
+      kind: compute.googleapis.com/Network
+      name: r.name
+    params:
+      psc_targets: [all-apis, vpc-sc]
+    check:
+      # PASS: a PSC endpoint for Google APIs is attached to the network.
+      # REVIEW: no endpoint, but every regular subnet enables Private Google Access.
+      # FAIL: neither.
+      assert: |
+        data.forwarding_rules.exists(f,
+          f.?target.orValue("") in params.psc_targets
+          && f.?network.orValue("").endsWith("/networks/" + r.name))
+        || (
+          data.subnets.exists(s,
+            s.?network.orValue("").endsWith("/networks/" + r.name)
+            && s.?purpose.orValue("PRIVATE") in ["PRIVATE", "PRIVATE_RFC_1918"])
+          && data.subnets.all(s,
+            !(s.?network.orValue("").endsWith("/networks/" + r.name)
+              && s.?purpose.orValue("PRIVATE") in ["PRIVATE", "PRIVATE_RFC_1918"])
+            || s.?privateIpGoogleAccess.orValue(false))
+        )
+      review_when: |
+        !data.forwarding_rules.exists(f,
+          f.?target.orValue("") in params.psc_targets
+          && f.?network.orValue("").endsWith("/networks/" + r.name))
+      message: "Network {{ .r.name }} has no Private Service Connect endpoint for Google APIs ({{ .params.psc_targets }}) and Private Google Access is off on some of its subnets, so those workloads need external IPs or NAT to reach Google APIs"
+      review_message: "Network {{ .r.name }} has no Private Service Connect endpoint for Google APIs and relies on Private Google Access on all of its subnets; confirm whether this VPC needs a PSC endpoint ({{ .params.psc_targets }}) or exempt it"
+    evidence:
+      - |
+        data.forwarding_rules
+          .filter(f, f.?target.orValue("") in params.psc_targets
+                     && f.?network.orValue("").endsWith("/networks/" + r.name))
+          .map(f, {"name": f.name, "target": f.target, "IPAddress": f.?IPAddress.orValue("")})
+      - |
+        data.subnets
+          .filter(s, s.?network.orValue("").endsWith("/networks/" + r.name))
+          .map(s, {"name": s.name, "region": s.region, "purpose": s.?purpose.orValue("PRIVATE"),
+                   "privateIpGoogleAccess": s.?privateIpGoogleAccess.orValue(false)})
+    remediation: |
+      gcloud compute addresses create <ADDRESS_NAME> --global --purpose=PRIVATE_SERVICE_CONNECT --addresses=<RFC1918_IP> --network=projects/<PROJECT_ID>/global/networks/<VPC_NAME>
+      gcloud compute forwarding-rules create <ENDPOINT_NAME> --global --network=<VPC_NAME> --address=<ADDRESS_NAME> --target-google-apis-bundle=all-apis
+      then create a private googleapis.com DNS zone whose *.googleapis.com A record points to the endpoint IP.
+    references:
+      - https://cloud.google.com/vpc/docs/configure-private-service-connect-apis
+    notes: |
+      Approximates CIS audit steps 2 and 3: a VPC network passes when a global forwarding rule whose
+      target is a Google API bundle in psc_targets (all-apis or vpc-sc) is attached to it (network URL
+      ends with /networks/<name>). Without such an endpoint, a network whose regular (PRIVATE) subnets
+      all enable Private Google Access is REVIEW: PGA keeps API traffic on Google's network but lacks the
+      endpoint-level firewall control PSC gives; any other network fails. CIS step 1 (which VPCs are in
+      scope) needs organization context: exempt VPCs whose workloads do not call Google APIs, and set
+      psc_targets to [vpc-sc] to require the VPC Service Controls bundle. Networks without subnets are not
+      applicable; for Shared VPC, scan the host project. Not evaluated: the private googleapis.com DNS
+      zone (step 4) and firewall rules restricting access to the endpoint (step 5).
+
+  - id: cis-gcp-3.10
+    ref: "3.10"
+    title: Ensure that VPC Flow Logs is Enabled for Every Subnet in a VPC Network
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: subnets
+        gcloud: compute networks subnets list --project={{ .project }} --format=json
+    resource:
+      from: data.subnets
+      filter: r.?purpose.orValue("PRIVATE") in ["PRIVATE", "PRIVATE_RFC_1918"]
+      kind: compute.googleapis.com/Subnetwork
+      # Path after projects/<id>/, e.g. regions/us-central1/subnetworks/default: subnet names are only
+      # unique within a region.
+      name: r.selfLink.substring(r.selfLink.indexOf("/", r.selfLink.indexOf("/projects/") + 10) + 1)
+    params:
+      aggregation_interval: INTERVAL_5_SEC
+      min_flow_sampling: 1.0
+      metadata: INCLUDE_ALL_METADATA
+    check:
+      assert: |
+        r.?logConfig.?enable.orValue(r.?enableFlowLogs.orValue(false))
+        && r.?logConfig.?aggregationInterval.orValue("") == params.aggregation_interval
+        && r.?logConfig.?flowSampling.orValue(0.0) >= params.min_flow_sampling
+        && r.?logConfig.?metadata.orValue("") == params.metadata
+        && r.?logConfig.?filterExpr.orValue("") == ""
+      message: "Subnet {{ .r.name }} does not have VPC Flow Logs on with interval {{ .params.aggregation_interval }}, sampling >= {{ .params.min_flow_sampling }}, metadata {{ .params.metadata }} and no filter"
+    evidence: [r.network, r.purpose, r.enableFlowLogs, r.logConfig]
+    remediation: gcloud compute networks subnets update <SUBNET_NAME> --region=<REGION> --enable-flow-logs --logging-aggregation-interval=interval-5-sec --logging-flow-sampling=1 --logging-metadata=include-all
+    references:
+      - https://cloud.google.com/vpc/docs/using-flow-logs#enabling_vpc_flow_logging
+    notes: |
+      Mirrors the CIS CLI audit: every subnet whose purpose is PRIVATE (or unset) must have flow logs
+      enabled (logConfig.enable, or the older enableFlowLogs field) with aggregationInterval
+      INTERVAL_5_SEC, flowSampling 1, metadata INCLUDE_ALL_METADATA and no filterExpr. Proxy-only
+      (REGIONAL_MANAGED_PROXY, GLOBAL_MANAGED_PROXY), PRIVATE_SERVICE_CONNECT and PRIVATE_NAT subnets do
+      not support flow logs and are filtered out. Flow logs are off by default, so missing fields fail.
+      The params default to the CIS values; relax them in a profile only as a documented exception (for
+      example for cost). Flow logs configured outside the subnet resource (Network Management API flow
+      log configurations) are not visible here.
+
+  - id: cis-gcp-3.11
+    ref: "3.11"
+    title: Ensure No HTTPS or SSL Proxy Load Balancers Permit SSL Policies With Weak Cipher Suites
+    profile: L1
+    cis_assessment: manual
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: ssl_policies
+        gcloud: compute ssl-policies list --project={{ .project }} --format=json
+      - id: https_proxies
+        gcloud: compute target-https-proxies list --project={{ .project }} --format=json
+      - id: ssl_proxies
+        gcloud: compute target-ssl-proxies list --project={{ .project }} --format=json
+    resource:
+      from: data.https_proxies + data.ssl_proxies
+      kind: compute.googleapis.com/TargetProxy
+      # Path after projects/<id>/, e.g. global/targetHttpsProxies/web: HTTPS and SSL proxies, and global
+      # and regional ones, can share a name.
+      name: r.selfLink.substring(r.selfLink.indexOf("/", r.selfLink.indexOf("/projects/") + 10) + 1)
+    params:
+      allowed_min_tls_versions: [TLS_1_2, TLS_1_3]
+      weak_custom_features:
+        - TLS_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_RSA_WITH_AES_128_CBC_SHA
+        - TLS_RSA_WITH_AES_256_CBC_SHA
+        - TLS_RSA_WITH_3DES_EDE_CBC_SHA
+    check:
+      assert: |
+        has(r.sslPolicy)
+        && data.ssl_policies.exists(p,
+             p.selfLink == r.sslPolicy
+             && (
+               p.?profile.orValue("COMPATIBLE") == "RESTRICTED"
+               || (p.?profile.orValue("COMPATIBLE") == "MODERN"
+                   && p.?minTlsVersion.orValue("TLS_1_0") in params.allowed_min_tls_versions)
+               || (p.?profile.orValue("COMPATIBLE") in ["CUSTOM", "FIPS_202205"]
+                   && p.?minTlsVersion.orValue("TLS_1_0") in params.allowed_min_tls_versions
+                   && !(p.?customFeatures.orValue([]) + p.?enabledFeatures.orValue([])).exists(f,
+                        f in params.weak_custom_features))
+             ))
+      message: "Target proxy {{ .r.name }} does not use an SSL policy that meets the CIS baseline (RESTRICTED, MODERN with TLS 1.2+, or CUSTOM with TLS 1.2+ and no weak RSA key-exchange suites); a proxy without sslPolicy uses the GCP default COMPATIBLE profile with TLS 1.0"
+    evidence:
+      - r.kind
+      - r.?sslPolicy.orValue("none (GCP default policy)")
+      - |
+        data.ssl_policies
+          .filter(p, p.selfLink == r.?sslPolicy.orValue(""))
+          .map(p, {"name": p.name, "profile": p.?profile.orValue("COMPATIBLE"),
+                   "minTlsVersion": p.?minTlsVersion.orValue("TLS_1_0"),
+                   "customFeatures": p.?customFeatures.orValue([]),
+                   "enabledFeatures": p.?enabledFeatures.orValue([])})
+    remediation: |
+      gcloud compute ssl-policies update <SSL_POLICY_NAME> --profile=MODERN --min-tls-version=1.2   (or --profile=RESTRICTED)
+      For a proxy without a policy, create one and attach it:
+      gcloud compute ssl-policies create <SSL_POLICY_NAME> --profile=MODERN --min-tls-version=1.2
+      gcloud compute target-https-proxies update <PROXY_NAME> --ssl-policy=<SSL_POLICY_NAME>
+      gcloud compute target-ssl-proxies update <PROXY_NAME> --ssl-policy=<SSL_POLICY_NAME>
+    references:
+      - https://cloud.google.com/load-balancing/docs/use-ssl-policies
+      - https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-52r2.pdf
+    notes: |
+      Implements the CIS CLI audit without per-proxy describe calls, because list output already carries
+      sslPolicy. The population is every target HTTPS and SSL proxy, global and regional. A proxy without
+      sslPolicy uses the GCP default policy (COMPATIBLE, TLS 1.0) and fails. Otherwise the referenced
+      policy is matched by selfLink and must be RESTRICTED (any minimum version; CIS notes it effectively
+      requires TLS 1.2), MODERN with minTlsVersion in allowed_min_tls_versions, or CUSTOM with
+      minTlsVersion in allowed_min_tls_versions and none of weak_custom_features in customFeatures or
+      enabledFeatures. Requiring TLS 1.2 for CUSTOM is stricter than the CIS text and follows NIST SP
+      800-52r2, which CIS references. FIPS_202205 is evaluated like CUSTOM from its enabledFeatures, so a
+      FIPS profile without weak suites passes instead of failing on its name. CIS marks this Manual, but
+      every input is observable, so the rule is deterministic.
+
+  - id: cis-gcp-3.12
+    ref: "3.12"
+    title: "Use Identity Aware Proxy (IAP) to Ensure Only Traffic From Google IP Addresses are 'Allowed'"
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: backend_services
+        gcloud: compute backend-services list --project={{ .project }} --format=json
+      - id: firewalls
+        gcloud: compute firewall-rules list --project={{ .project }} --format=json
+    resource:
+      from: data.backend_services
+      # External Application Load Balancer backends served by VMs (instance groups or zonal NEGs);
+      # VPC firewall rules do not apply to serverless, internet or PSC NEG backends.
+      filter: |
+        r.?loadBalancingScheme.orValue("EXTERNAL") in ["EXTERNAL", "EXTERNAL_MANAGED"]
+        && r.?protocol.orValue("HTTP") in ["HTTP", "HTTPS", "HTTP2"]
+        && r.?backends.orValue([]).exists(b,
+             b.?group.orValue("").contains("/instanceGroups/")
+             || b.?group.orValue("").matches("/zones/[^/]+/networkEndpointGroups/"))
+      kind: compute.googleapis.com/BackendService
+      # Path after projects/<id>/, e.g. global/backendServices/web: global and regional backend services
+      # can share a name.
+      name: r.selfLink.substring(r.selfLink.indexOf("/", r.selfLink.indexOf("/projects/") + 10) + 1)
+    params:
+      google_ranges: ["35.235.240.0/20", "130.211.0.0/22", "35.191.0.0/16"]
+      trusted_source_ranges: []
+      app_ports: [80, 443]
+    check:
+      # FAIL: IAP is on but the internet can reach the app ports directly.
+      # REVIEW: IAP is off, or sources outside google_ranges and trusted_source_ranges reach the app ports.
+      assert: |
+        !r.?iap.?enabled.orValue(false)
+        || !data.firewalls.exists(f,
+             f.direction == "INGRESS"
+             && !f.?disabled.orValue(false)
+             && f.?sourceRanges.orValue([]).exists(s, cidrIsPublic(s))
+             && f.?allowed.orValue([]).exists(a,
+                  a.IPProtocol in ["tcp", "all"]
+                  && (!has(a.ports) || a.ports.exists(p, params.app_ports.exists(port, portRangeContains(p, port))))))
+      review_when: |
+        !r.?iap.?enabled.orValue(false)
+        || data.firewalls.exists(f,
+             f.direction == "INGRESS"
+             && !f.?disabled.orValue(false)
+             && f.?sourceRanges.orValue([]).exists(s,
+                  !(s in params.google_ranges) && !(s in params.trusted_source_ranges))
+             && f.?allowed.orValue([]).exists(a,
+                  a.IPProtocol in ["tcp", "all"]
+                  && (!has(a.ports) || a.ports.exists(p, params.app_ports.exists(port, portRangeContains(p, port))))))
+      message: "IAP is enabled on backend service {{ .r.name }}, but an ingress firewall rule allows ports {{ .params.app_ports }} from the internet, so requests can bypass IAP"
+      review_message: "Backend service {{ .r.name }}: IAP is not enabled, or firewall rules admit sources outside google_ranges and trusted_source_ranges to ports {{ .params.app_ports }}; confirm the application does not need IAP, or that those sources cannot bypass it (then add them to trusted_source_ranges)"
+    evidence:
+      - r.?iap.?enabled.orValue(false)
+      - r.backends.map(b, b.group)
+      - |
+        data.firewalls
+          .filter(f, f.direction == "INGRESS"
+                     && !f.?disabled.orValue(false)
+                     && f.?sourceRanges.orValue([]).exists(s,
+                          !(s in params.google_ranges) && !(s in params.trusted_source_ranges))
+                     && f.?allowed.orValue([]).exists(a,
+                          a.IPProtocol in ["tcp", "all"]
+                          && (!has(a.ports) || a.ports.exists(p, params.app_ports.exists(port, portRangeContains(p, port))))))
+          .map(f, {"name": f.name, "network": f.network, "sourceRanges": f.sourceRanges,
+                   "allowed": f.allowed, "targetTags": f.?targetTags.orValue([])})
+    remediation: |
+      gcloud compute firewall-rules create allow-iap-traffic --network=<NETWORK> --direction=INGRESS --action=ALLOW --rules=tcp:80,tcp:443 --source-ranges=35.235.240.0/20,130.211.0.0/22,35.191.0.0/16
+      then delete or narrow the broader rules, e.g. gcloud compute firewall-rules delete default-allow-http default-allow-https default-allow-internal
+    references:
+      - https://cloud.google.com/iap/docs/concepts-overview
+      - https://cloud.google.com/iap/docs/load-balancer-howto
+      - https://cloud.google.com/load-balancing/docs/health-checks
+    notes: |
+      CIS marks this Manual because it depends on which applications sit behind IAP and which ports they
+      serve. Population: external Application Load Balancer backend services (scheme EXTERNAL or
+      EXTERNAL_MANAGED, protocol HTTP, HTTPS or HTTP2) with VM backends (instance groups or zonal NEGs).
+      When IAP is enabled, an enabled INGRESS allow rule that admits 0.0.0.0/0 or ::/0 to tcp/all on an
+      app port fails, because clients could reach the backends without passing through IAP. Other source
+      ranges outside google_ranges (IAP 35.235.240.0/20, health checks 130.211.0.0/22 and 35.191.0.0/16)
+      and trusted_source_ranges produce REVIEW; add accepted internal or partner ranges to
+      trusted_source_ranges. Backend services without IAP produce REVIEW because not every load balancer
+      should be behind IAP; exempt the intentionally public ones. Approximation: the backend's network,
+      instance tags, named ports and serving ports are not resolved, so every firewall rule in the
+      project is checked against app_ports (set it to the ports your backends serve). Deny rules, rule
+      priority, source tags and service accounts, and hierarchical or network firewall policies are not
+      evaluated.

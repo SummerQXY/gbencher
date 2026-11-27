@@ -1,0 +1,45 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {
+    "namespaces": {
+      "apiVersion": "v1",
+      "kind": "NamespaceList",
+      "items": []
+    },
+    "pods": {
+      "apiVersion": "v1",
+      "kind": "PodList",
+      "items": []
+    },
+    "quotas": {
+      "apiVersion": "v1",
+      "kind": "ResourceQuotaList",
+      "items": []
+    },
+    "limitranges": {
+      "apiVersion": "v1",
+      "kind": "LimitRangeList",
+      "items": []
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-4.6.1",
+      "resource_key": "projects/example-project/locations/us-central1/clusters/example-cluster",
+      "status": "NOT_APPLICABLE"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "namespaces": "schema",
+      "pods": "schema",
+      "quotas": "schema",
+      "limitranges": "schema"
+    }
+  }
+}

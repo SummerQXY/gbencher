@@ -1,0 +1,29 @@
+# Lint fixture: the only defect is an expression that does not compile (it ends in an operator).
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-cel-compile-1
+    ref: "1.1"
+    title: Fixture with an expression that does not compile
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: r.name
+    check:
+      assert: r.status ==
+      message: "Instance {{ .r.name }} is not running"
+    remediation: Start the instance.
+    notes: Fixture for the lint tests.

@@ -1,0 +1,60 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {
+    "pods": {
+      "apiVersion": "v1",
+      "kind": "PodList",
+      "items": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "metadata": {
+            "name": "api-old",
+            "namespace": "payments",
+            "ownerReferences": [
+              {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": "api",
+                "uid": "deployment-uid",
+                "controller": true,
+                "blockOwnerDeletion": true
+              }
+            ]
+          },
+          "spec": {
+            "containers": [
+              {
+                "name": "app",
+                "image": "example.com/app:v1"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "replicasets": {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSetList",
+      "items": []
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-4.4.1",
+      "resource_key": "payments/Deployment/api",
+      "status": "PASS"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "pods": "schema",
+      "replicasets": "schema"
+    }
+  }
+}

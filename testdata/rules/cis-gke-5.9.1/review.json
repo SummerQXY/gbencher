@@ -1,0 +1,40 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {
+    "storage_classes": {
+      "apiVersion": "v1",
+      "kind": "StorageClassList",
+      "items": [
+        {
+          "apiVersion": "storage.k8s.io/v1",
+          "kind": "StorageClass",
+          "metadata": {
+            "name": "non-default-class",
+            "annotations": {
+              "storageclass.kubernetes.io/is-default-class": "false"
+            }
+          },
+          "provisioner": "kubernetes.io/gce-pd",
+          "parameters": {}
+        }
+      ]
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-5.9.1",
+      "resource_key": "projects/example-project/non-default-class",
+      "status": "REVIEW"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "storage_classes": "schema"
+    }
+  }
+}

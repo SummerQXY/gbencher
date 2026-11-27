@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "ruleset_hash": "sha256:6ff5c337b6afaee7b784ae93d2ea11301b1e0ea5e89395d9997a539f6c57d9a2",
+  "rules": [
+    {
+      "id": "cis-gcp-3.6",
+      "ref": "3.6",
+      "title": "Ensure That SSH Access Is Restricted From the Internet",
+      "benchmark": {"id": "cis-gcp-foundation", "version": "5.0.0"},
+      "section": {"id": "3", "title": "Networking"},
+      "profile": "L2",
+      "cis_assessment": "automated",
+      "mode": "deterministic",
+      "severity": "high",
+      "scope": "project",
+      "services": ["compute.googleapis.com"],
+      "requires": [],
+      "params": {
+        "ports": {"default": [22], "type": "array"},
+        "public_ranges": {"default": ["0.0.0.0/0", "::/0"], "type": "array"}
+      },
+      "verification": "fixture",
+      "remediation": "gcloud compute firewall-rules update <RULE> --source-ranges=<TRUSTED_CIDRS>\n",
+      "references": ["https://cloud.google.com/vpc/docs/using-firewalls"],
+      "notes": "Mirrors the CIS audit: INGRESS + 0.0.0.0/0 + tcp/all + port 22 (or no port restriction).\n"
+    },
+    {
+      "id": "cis-gcp-2.2",
+      "ref": "2.2",
+      "title": "Ensure Google Workspace/Cloud Identity Data Sharing with Google Cloud is Enabled for Admin Audit Logging",
+      "benchmark": {"id": "cis-gcp-foundation", "version": "5.0.0"},
+      "section": {"id": "2", "title": "Logging and Monitoring"},
+      "profile": "L1",
+      "cis_assessment": "manual",
+      "mode": "contextual",
+      "severity": "medium",
+      "scope": "organization",
+      "evaluate_per": "organization",
+      "services": ["logging.googleapis.com"],
+      "requires": ["org-access"],
+      "params": {
+        "freshness_days": {"default": 30, "type": "integer"},
+        "fail_when_no_entries": {"default": false, "type": "boolean"}
+      },
+      "params_constraints": {"freshness_days": {"minimum": 1, "maximum": 365}},
+      "verification": "none",
+      "remediation": "Google Admin console as a Super Admin: Account > Account settings > Legal and compliance > Sharing options.\n",
+      "references": ["https://cloud.google.com/logging/docs/audit/gsuite-audit-logging"],
+      "notes": "CIS audits the sharing setting in the Google Admin console, which has no read API; the rule reads one recent admin or login audit entry instead.\n"
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "scan": {
+    "id": "scan-20261111T080000Z-a1b2c3",
+    "started_at": "2026-11-11T08:00:00Z",
+    "finished_at": "2026-11-11T08:01:12Z",
+    "status": "completed_with_gaps",
+    "tool": {"name": "gbench", "version": "0.1.0", "ruleset_hash": "sha256:6ff5c337b6afaee7b784ae93d2ea11301b1e0ea5e89395d9997a539f6c57d9a2", "ruleset_source": "embedded"},
+    "environment": {"gcloud_version": "570.0.0", "kubectl_version": "v1.33.9", "os": "linux", "arch": "amd64"},
+    "identity": {"account": "scanner@example-sec.iam.gserviceaccount.com", "impersonated": null, "quota_project": "example-sec"},
+    "targets": [{
+      "type": "project", "id": "example-prod", "number": "123456789012", "organization": "111111111111",
+      "clusters": {"status": "SUCCEEDED", "names": ["projects/example-prod/locations/asia-east1/clusters/prod-a"], "unreachable": []}
+    }],
+    "selection": {"profile_hash": "sha256:922b86f93edb6be8944bb4b360be71abdf14769e683851ac848067a216143b6d", "benchmarks": ["cis-gcp-foundation@5.0.0", "cis-gke@2.0.0"], "levels": ["L1", "L2"], "capabilities": ["kubectl"], "rules_selected": 147},
+    "coverage": {"units": 190, "evaluated": 171, "not_applicable": 12, "skipped": 6, "error": 1}
+  },
+  "summary": {"results_total": 230, "status_counts": {"PASS": 180, "FAIL": 9, "REVIEW": 12, "NOT_APPLICABLE": 12, "SKIPPED": 16, "ERROR": 1}},
+  "rule_summaries": [{
+    "rule_id": "cis-gcp-3.6", "rule_hash": "sha256:5f31111508367e0cc005b7bc3c3e54e90eb5e6fe0ab570ca3c60b91c79f9cb70", "ref": "3.6", "title": "Ensure That SSH Access Is Restricted From the Internet",
+    "profile": "L2", "severity": "high", "mode": "deterministic", "verification": "fixture",
+    "effective_params": {"ports": [22], "public_ranges": ["0.0.0.0/0", "::/0"]},
+    "status": "MIXED", "status_counts": {"PASS": 14, "FAIL": 1}
+  }],
+  "results": [
+    {
+      "id": "result-17", "finding_key": "fk1:210d77630394f3b301e4900bbd57fce8",
+      "rule": {"id": "cis-gcp-3.6", "ref": "3.6", "title": "Ensure That SSH Access Is Restricted From the Internet", "profile": "L2", "severity": "high", "mode": "deterministic"},
+      "target": {"type": "project", "key": "projects/example-prod", "project_id": "example-prod"},
+      "resource": {"kind": "compute.googleapis.com/Firewall", "name": "projects/example-prod/global/firewalls/allow-ssh", "key": "projects/example-prod/global/firewalls/allow-ssh"},
+      "collection": {"status": "SUCCEEDED", "collector_ids": ["collect-04"], "error": null},
+      "assessment": {"status": "FAIL", "message": "Firewall rule allow-ssh allows TCP port(s) [22] from [0.0.0.0/0]", "review_reason": null},
+      "evidence": [{"expr": "r.sourceRanges", "value": ["0.0.0.0/0"], "collector_id": "collect-04"}]
+    },
+    {
+      "id": "result-88", "finding_key": "fk1:027f0c84fe22a47e8e5e6127754dc4b3",
+      "rule": {"id": "cis-gcp-2.16", "ref": "2.16", "title": "Ensure 'Access Approval' is 'Enabled'", "profile": "L2", "severity": "medium", "mode": "deterministic"},
+      "target": {"type": "project", "key": "projects/example-prod", "project_id": "example-prod"},
+      "resource": {"kind": "accessapproval.googleapis.com/Settings", "name": "projects/example-prod/accessApprovalSettings", "key": "projects/example-prod/accessApprovalSettings"},
+      "collection": {"status": "FAILED", "collector_ids": ["collect-31"], "error": {"class": "permission_denied", "summary": "caller lacks serviceusage.services.use on the quota project"}},
+      "assessment": {"status": "SKIPPED", "message": "not evaluated: permission denied", "review_reason": null},
+      "evidence": []
+    },
+    {
+      "id": "result-121", "finding_key": "fk1:7fd73873d45f67c1c8b5225d816196c7",
+      "rule": {"id": "cis-gke-4.4.1", "ref": "4.4.1", "title": "Prefer using secrets as files over secrets as environment variables", "profile": "L1", "severity": "high", "mode": "deterministic"},
+      "target": {"type": "cluster", "key": "projects/example-prod/locations/asia-east1/clusters/prod-a", "project_id": "example-prod", "cluster": "prod-a"},
+      "resource": {"kind": "k8s.io/Pod", "name": "projects/example-prod/locations/asia-east1/clusters/prod-a/shop/Deployment/web", "key": "shop/Deployment/web", "members": 3},
+      "collection": {"status": "SUCCEEDED", "collector_ids": ["collect-52", "collect-53"], "error": null},
+      "assessment": {"status": "FAIL", "message": "Container runs privileged", "review_reason": null},
+      "evidence": [{"expr": "r.metadata.name", "value": "web-5d8f7c9b6-abcde", "collector_id": "collect-52"}]
+    }
+  ],
+  "collectors": [{
+    "id": "collect-04", "type": "gcloud",
+    "command": "gcloud compute firewall-rules list --project=example-prod --format=json --account=scanner@example-sec.iam.gserviceaccount.com --quiet",
+    "started_at": "2026-11-11T08:00:03Z", "duration_ms": 850, "status": "SUCCEEDED", "exit_code": 0, "error_class": null, "error": null
+  }]
+}

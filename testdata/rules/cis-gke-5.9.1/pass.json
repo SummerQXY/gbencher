@@ -1,0 +1,42 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {
+    "storage_classes": {
+      "apiVersion": "v1",
+      "kind": "StorageClassList",
+      "items": [
+        {
+          "apiVersion": "storage.k8s.io/v1",
+          "kind": "StorageClass",
+          "metadata": {
+            "name": "encrypted-default",
+            "annotations": {
+              "storageclass.kubernetes.io/is-default-class": "true"
+            }
+          },
+          "provisioner": "pd.csi.storage.gke.io",
+          "parameters": {
+            "disk-encryption-kms-key": "projects/example-kms-project/locations/us-central1/keyRings/example-ring/cryptoKeys/example-key"
+          }
+        }
+      ]
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-5.9.1",
+      "resource_key": "projects/example-project/encrypted-default",
+      "status": "PASS"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "storage_classes": "schema"
+    }
+  }
+}

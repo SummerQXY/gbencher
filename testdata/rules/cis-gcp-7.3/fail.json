@@ -1,0 +1,37 @@
+{
+  "target": {
+    "type": "project",
+    "project_id": "example-prod"
+  },
+  "data": {
+    "datasets": [
+      {
+        "datasetReference": {
+          "datasetId": "analytics",
+          "projectId": "example-prod"
+        }
+      }
+    ],
+    "dataset_details": [
+      {
+        "datasetReference": {
+          "datasetId": "analytics",
+          "projectId": "example-prod"
+        }
+      }
+    ]
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gcp-7.3",
+      "resource_key": "projects/example-prod/analytics",
+      "status": "FAIL"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "datasets": "schema",
+      "dataset_details": "schema"
+    }
+  }
+}

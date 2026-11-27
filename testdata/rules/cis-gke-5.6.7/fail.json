@@ -1,0 +1,46 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {
+    "ingresses": {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "IngressList",
+      "items": [
+        {
+          "apiVersion": "networking.k8s.io/v1",
+          "kind": "Ingress",
+          "metadata": {
+            "name": "api",
+            "namespace": "web",
+            "annotations": {
+              "networking.gke.io/managed-certificates": "missing-cert"
+            }
+          },
+          "spec": {}
+        }
+      ]
+    },
+    "managed_certs": {
+      "apiVersion": "networking.gke.io/v1",
+      "kind": "ManagedCertificateList",
+      "items": []
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-5.6.7",
+      "resource_key": "projects/example-project/web/api",
+      "status": "FAIL"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "ingresses": "schema",
+      "managed_certs": "schema"
+    }
+  }
+}

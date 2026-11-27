@@ -1,0 +1,30 @@
+# Lint fixture, second half of a pair: this file and a.yaml define the same rule id. Each file is
+# valid on its own.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-rule-id-duplicate-1
+    ref: "1.2"
+    title: Another fixture with the same rule id
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: disks
+        gcloud: compute disks list --project={{ .project }} --format=json
+    resource:
+      from: data.disks
+      kind: compute.googleapis.com/Disk
+      name: r.name
+    check:
+      assert: r.status == "READY"
+      message: "Disk {{ .r.name }} is not ready"
+    remediation: Repair the disk.
+    notes: Fixture for the lint tests.

@@ -1,0 +1,1210 @@
+dsl_version: 1
+benchmark:
+  id: cis-gke
+  version: "2.0.0"
+  section: "4"
+  title: Policies
+# GKE rule design convention: scope: cluster means the engine enumerates clusters and injects the current cluster JSON into ctx.cluster and implicit data.cluster; rules must not repeat a cluster-level collect.
+rules:
+  - id: cis-gke-4.1.1
+    ref: "4.1.1"
+    title: Ensure the cluster-admin ClusterRole is only used when required
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: crb
+        kubectl: get clusterrolebindings -o json
+      - id: rb
+        kubectl: get rolebindings --all-namespaces -o json
+    resource:
+      from: data.crb.items + data.rb.items
+      filter: 'r.roleRef.kind == "ClusterRole" && r.roleRef.name == "cluster-admin"'
+      kind: rbac.authorization.k8s.io/Binding
+      name: r.?metadata.?namespace.orValue("cluster") + "/" + r.metadata.name
+    params:
+      allowed_subjects:
+        - kind: Group
+          name: "system:masters"
+      broad_subject_regex: '^system:(anonymous|unauthenticated|authenticated|serviceaccounts(:.+)?)$'
+    check:
+      assert: |
+        !r.?subjects.orValue([]).exists(s,
+          (s.kind in ["User", "Group"] && s.name.matches(params.broad_subject_regex))
+          || (s.kind == "ServiceAccount" && s.name == "default"))
+      review_when: |
+        r.?subjects.orValue([]).exists(s,
+          !params.allowed_subjects.exists(a,
+            a.kind == s.kind && a.name == s.name
+            && (!has(a.namespace) || a.namespace == s.?namespace.orValue(r.metadata.?namespace.orValue("")))))
+      message: "Binding {{ .r.metadata.name }} grants cluster-admin to a cluster-wide group, anonymous users or a default service account: {{ .r.subjects }}"
+      review_message: "Binding {{ .r.metadata.name }} grants cluster-admin to subjects outside allowed_subjects ({{ .r.subjects }}); confirm each one has a documented need for full administrative access, then add it to allowed_subjects or replace the binding"
+    evidence: [r.subjects, r.roleRef]
+    remediation: |
+      Bind a least-privilege Role or ClusterRole to the subject, validate it, then remove the binding:
+      kubectl delete clusterrolebinding <NAME>   (or: kubectl delete rolebinding <NAME> -n <NAMESPACE>)
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
+    notes: |
+      Population is every ClusterRoleBinding and RoleBinding whose roleRef is ClusterRole/cluster-admin, the
+      same objects as the two jq queries of the CIS audit. The manual "is cluster-admin explicitly required"
+      review becomes an allowlist: subjects in allowed_subjects (default: the built-in system:masters group)
+      pass and any other subject produces REVIEW. Granting cluster-admin to system:anonymous,
+      system:unauthenticated, system:authenticated, system:serviceaccounts[:<namespace>] (broad_subject_regex)
+      or to a namespace default service account is never justified and fails. Tune allowed_subjects with
+      {kind, name, namespace} entries (namespace is optional and only meaningful for ServiceAccount subjects)
+      for approved break-glass groups and platform controllers such as the Config Sync root reconciler.
+      Bindings with the system: prefix are reported but must not be deleted.
+
+  - id: cis-gke-4.1.2
+    ref: "4.1.2"
+    title: Ensure access to Secrets is minimized and granted only where required
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: cr
+        kubectl: get clusterroles -o json
+      - id: roles
+        kubectl: get roles --all-namespaces -o json
+      - id: crb
+        kubectl: get clusterrolebindings -o json
+      - id: rb
+        kubectl: get rolebindings --all-namespaces -o json
+    resource:
+      from: data.crb.items + data.rb.items
+      filter: |
+        !params.system_role_prefixes.exists(p, r.metadata.name.startsWith(p) || r.roleRef.name.startsWith(p))
+        && !r.metadata.?labels.orValue({}).exists(k, k in params.system_label_keys)
+        && (data.cr.items + data.roles.items).exists(x,
+             x.metadata.name == r.roleRef.name
+             && (r.roleRef.kind == "ClusterRole"
+                   ? !has(x.metadata.namespace)
+                   : x.metadata.?namespace.orValue("") == r.metadata.?namespace.orValue(""))
+             && x.?rules.orValue([]).exists(rule,
+                  rule.?apiGroups.orValue([]).exists(g, g == "" || g == "*")
+                  && rule.?resources.orValue([]).exists(res, res == "secrets" || res == "*")
+                  && rule.?verbs.orValue([]).exists(v, v in params.secret_read_verbs)))
+      kind: rbac.authorization.k8s.io/Binding
+      name: r.?metadata.?namespace.orValue("cluster") + "/" + r.metadata.name
+    params:
+      secret_read_verbs: [get, list, watch, "*"]
+      allowed_subjects:
+        - kind: Group
+          name: "system:masters"
+      trust_system_namespace_service_accounts: true
+      broad_subject_regex: '^system:(anonymous|unauthenticated|authenticated|serviceaccounts(:.+)?)$'
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+      system_role_prefixes: ["system:", "gce:", "gmp-system:", "configsync.gke.io:", cloud-provider, stackdriver,
+        gke-metrics-agent, gke-managed-, netd, kube-dns, fluentbit-gke, event-exporter, metrics-server, calico,
+        cilium, anetd, ip-masq-agent, konnectivity, pdcsi, csi-gce-pd, gcsfusecsi, filestorecsi, gatekeeper-,
+        istiod-, istio-reader-, cnrm-]
+      system_label_keys: [kubernetes.io/bootstrapping, addonmanager.kubernetes.io/mode, gatekeeper.sh/system,
+        configmanagement.gke.io/system, cnrm.cloud.google.com/system]
+    check:
+      assert: |
+        !r.?subjects.orValue([]).exists(s,
+          (s.kind in ["User", "Group"] && s.name.matches(params.broad_subject_regex))
+          || (s.kind == "ServiceAccount" && s.name == "default"))
+      review_when: |
+        r.?subjects.orValue([]).exists(s,
+          !params.allowed_subjects.exists(a,
+              a.kind == s.kind && a.name == s.name
+              && (!has(a.namespace) || a.namespace == s.?namespace.orValue(r.metadata.?namespace.orValue(""))))
+          && !(params.trust_system_namespace_service_accounts
+               && s.kind == "ServiceAccount"
+               && s.?namespace.orValue(r.metadata.?namespace.orValue("")).matches(params.system_namespaces_regex)))
+      message: "Binding {{ .r.metadata.name }} grants Secret read access through {{ .r.roleRef.kind }}/{{ .r.roleRef.name }} to a cluster-wide group, anonymous users or a default service account: {{ .r.subjects }}"
+      review_message: "Binding {{ .r.metadata.name }} grants Secret read access through {{ .r.roleRef.kind }}/{{ .r.roleRef.name }} to {{ .r.subjects }}; confirm each subject has a documented need limited to the required namespace, Secret and verb, then add it to allowed_subjects"
+    evidence:
+      - r.subjects
+      - r.roleRef
+      - |
+        (data.cr.items + data.roles.items).filter(x,
+          x.metadata.name == r.roleRef.name
+          && (r.roleRef.kind == "ClusterRole"
+                ? !has(x.metadata.namespace)
+                : x.metadata.?namespace.orValue("") == r.metadata.?namespace.orValue("")))
+        .map(x, x.?rules.orValue([]))
+    remediation: |
+      Remove get/list/watch on secrets (including wildcard resources or verbs) from the role, or remove the binding:
+      kubectl edit clusterrole <ROLE>   or   kubectl edit role <ROLE> -n <NAMESPACE>
+      kubectl delete clusterrolebinding <NAME>   or   kubectl delete rolebinding <NAME> -n <NAMESPACE>
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
+      - https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/workload-identity-secrets
+    notes: |
+      The CIS audit traces Roles/ClusterRoles that grant get, list or watch on core secrets to their bindings
+      and subjects. Population is every binding; the filter keeps bindings whose referenced role has a rule
+      with apiGroup "" or *, resource secrets or *, and a verb in secret_read_verbs (wildcards included).
+      Kubernetes and GKE system objects are excluded by binding/role name prefix (system_role_prefixes) and
+      by binding labels (system_label_keys), so the default cluster-admin binding to system:masters and GKE
+      add-on bindings are skipped, while user bindings to admin, edit or cluster-admin stay in scope.
+      Secret access granted to a cluster-wide group, anonymous users, all service accounts of a namespace or a
+      default service account fails. Any other subject produces REVIEW unless it is in allowed_subjects or,
+      with trust_system_namespace_service_accounts, it is a ServiceAccount in a namespace matching
+      system_namespaces_regex (GKE and fleet add-on controllers). Tune allowed_subjects for approved
+      operators and CI identities. Rules narrowed with resourceNames are treated like unrestricted ones.
+
+  - id: cis-gke-4.1.3
+    ref: "4.1.3"
+    title: Minimize wildcard use in Roles and ClusterRoles
+    profile: L1
+    cis_assessment: manual
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: cr
+        kubectl: get clusterroles -o json
+      - id: roles
+        kubectl: get roles --all-namespaces -o json
+    resource:
+      from: data.cr.items + data.roles.items
+      filter: |
+        !params.system_role_prefixes.exists(p, r.metadata.name.startsWith(p))
+        && !r.metadata.?labels.orValue({}).exists(k, k in params.system_label_keys)
+        && !r.metadata.?namespace.orValue("").matches(params.system_namespaces_regex)
+      kind: rbac.authorization.k8s.io/Role
+      name: r.?metadata.?namespace.orValue("cluster") + "/" + r.metadata.name
+    params:
+      allowed_roles: []
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+      system_role_prefixes: ["system:", "gce:", "gmp-system:", "configsync.gke.io:", cloud-provider, stackdriver,
+        gke-metrics-agent, gke-managed-, netd, kube-dns, fluentbit-gke, event-exporter, metrics-server, calico,
+        cilium, anetd, ip-masq-agent, konnectivity, pdcsi, csi-gce-pd, gcsfusecsi, filestorecsi, gatekeeper-,
+        istiod-, istio-reader-, cnrm-]
+      system_label_keys: [kubernetes.io/bootstrapping, addonmanager.kubernetes.io/mode, gatekeeper.sh/system,
+        configmanagement.gke.io/system, cnrm.cloud.google.com/system]
+    check:
+      assert: |
+        (has(r.metadata.namespace) ? r.metadata.namespace + "/" + r.metadata.name : r.metadata.name) in params.allowed_roles
+        || !r.?rules.orValue([]).exists(rule,
+             "*" in rule.?apiGroups.orValue([])
+             || "*" in rule.?resources.orValue([])
+             || "*" in rule.?verbs.orValue([]))
+      message: "{{ .r.kind }} {{ .r.metadata.name }} uses a wildcard (*) in apiGroups, resources or verbs"
+    evidence:
+      - |
+        r.?rules.orValue([]).filter(rule,
+          "*" in rule.?apiGroups.orValue([])
+          || "*" in rule.?resources.orValue([])
+          || "*" in rule.?verbs.orValue([]))
+    remediation: |
+      Replace each * with the explicit API groups, resources and verbs the subject needs:
+      kubectl edit clusterrole <ROLE>   or   kubectl edit role <ROLE> -n <NAMESPACE>
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+      - https://docs.cloud.google.com/kubernetes-engine/policy-controller/docs/latest/reference/constraint-template-library
+    notes: |
+      Mirrors the CIS jq query (* in apiGroups, resources or verbs) over Roles and ClusterRoles. Kubernetes
+      defaults (label kubernetes.io/bootstrapping, which covers cluster-admin, admin and edit), GKE and fleet
+      add-on objects (other system_label_keys), names starting with system_role_prefixes and Roles in system
+      namespaces are excluded because CIS advises against modifying them. Every other wildcard fails.
+      Wildcard presence is objective, so the rule is deterministic even though CIS marks it Manual; the
+      human judgement "is this wildcard required and documented" is captured by allowed_roles (ClusterRole
+      name, or namespace/name for a Role). A wildcard in nonResourceURLs alone is not flagged, as in CIS.
+
+  - id: cis-gke-4.1.4
+    ref: "4.1.4"
+    title: Ensure that default service accounts are not actively used
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: serviceaccounts
+        kubectl: get serviceaccounts --all-namespaces -o json
+      - id: pods
+        kubectl: get pods --all-namespaces -o json
+      - id: crb
+        kubectl: get clusterrolebindings -o json
+      - id: rb
+        kubectl: get rolebindings --all-namespaces -o json
+    resource:
+      from: data.serviceaccounts.items
+      filter: 'r.metadata.name == "default" && !r.metadata.namespace.matches(params.system_namespaces_regex)'
+      kind: k8s.io/ServiceAccount
+      name: r.metadata.namespace + "/" + r.metadata.name
+    params:
+      require_automount_disabled: true
+      allowed_bindings: []
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+    check:
+      assert: |
+        (!params.require_automount_disabled || !r.?automountServiceAccountToken.orValue(true))
+        && !data.pods.items.exists(p,
+             p.metadata.namespace == r.metadata.namespace
+             && p.spec.?serviceAccountName.orValue("default") == "default")
+        && !(data.crb.items + data.rb.items).exists(b,
+             !((has(b.metadata.namespace) ? b.metadata.namespace + "/" + b.metadata.name : b.metadata.name) in params.allowed_bindings)
+             && b.?subjects.orValue([]).exists(s,
+                  (s.kind == "ServiceAccount" && s.name == "default"
+                   && s.?namespace.orValue(b.metadata.?namespace.orValue("")) == r.metadata.namespace)
+                  || (s.kind == "Group" && s.name == "system:serviceaccounts:" + r.metadata.namespace)))
+      message: "Default service account in namespace {{ .r.metadata.namespace }} is used by pods, holds RBAC bindings, or does not set automountServiceAccountToken: false"
+    evidence:
+      - r.?automountServiceAccountToken.orValue(true)
+      - |
+        data.pods.items.filter(p,
+          p.metadata.namespace == r.metadata.namespace
+          && p.spec.?serviceAccountName.orValue("default") == "default")
+        .map(p, p.metadata.name)
+      - |
+        (data.crb.items + data.rb.items).filter(b,
+          b.?subjects.orValue([]).exists(s,
+            (s.kind == "ServiceAccount" && s.name == "default"
+             && s.?namespace.orValue(b.metadata.?namespace.orValue("")) == r.metadata.namespace)
+            || (s.kind == "Group" && s.name == "system:serviceaccounts:" + r.metadata.namespace)))
+        .map(b, b.?metadata.?namespace.orValue("cluster") + "/" + b.metadata.name)
+    remediation: |
+      kubectl patch serviceaccount default -n <NAMESPACE> -p '{"automountServiceAccountToken": false}'
+      Set spec.serviceAccountName to a dedicated service account in each workload template, and remove
+      bindings to the default service account: kubectl delete rolebinding <NAME> -n <NAMESPACE>
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity
+    notes: |
+      The CIS audit inspects the default ServiceAccount of each namespace, so the population is the default
+      ServiceAccount of every namespace outside system_namespaces_regex (one result per namespace). It fails
+      when (a) automountServiceAccountToken is not explicitly false (the default is true, so absence fails;
+      require_automount_disabled=false relaxes this), (b) any pod in the namespace omits serviceAccountName
+      or sets it to default, or (c) a RoleBinding or ClusterRoleBinding names the default ServiceAccount or
+      the system:serviceaccounts:<namespace> group, unless the binding is a documented exception listed in
+      allowed_bindings (ClusterRoleBinding name, or namespace/name for a RoleBinding). Pods are read live, so
+      workloads scaled to zero and CronJobs between runs are not seen.
+
+  - id: cis-gke-4.1.5
+    ref: "4.1.5"
+    title: Ensure service account tokens are mounted only when Pods require Kubernetes API access
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: medium
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: pods
+        kubectl: get pods --all-namespaces -o json
+      - id: replicasets
+        kubectl: get replicasets --all-namespaces -o json
+      - id: serviceaccounts
+        kubectl: get serviceaccounts --all-namespaces -o json
+      - id: crb
+        kubectl: get clusterrolebindings -o json
+      - id: rb
+        kubectl: get rolebindings --all-namespaces -o json
+    resource:
+      from: data.pods.items
+      filter: "!r.metadata.namespace.matches(params.system_namespaces_regex)"
+      kind: k8s.io/Pod
+      name: r.metadata.namespace + "/" + r.metadata.name
+      key: >-
+        r.metadata.namespace + "/" + (
+          r.metadata.?ownerReferences.orValue([]).filter(owner, owner.?controller.orValue(false)).size() == 0
+          ? r.metadata.name
+          : r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind == "ReplicaSet"
+            ? (
+              data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name).size() > 0
+              ? (
+                data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.?ownerReferences.orValue([]).filter(owner, owner.?controller.orValue(false)).size() > 0
+                ? (
+                  data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind
+                  + "/"
+                  + data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name
+                )
+                : r.metadata.name
+              )
+              : r.metadata.name
+            )
+            : r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind
+              + "/"
+              + r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name
+        )
+    params:
+      api_client_service_accounts: []
+      assume_bound_service_accounts_need_api: true
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+    check:
+      assert: |
+        r.spec.?serviceAccountName.orValue("default") != "default"
+        || !r.spec.?automountServiceAccountToken.orValue(
+             !data.serviceaccounts.items.exists(sa,
+               sa.metadata.namespace == r.metadata.namespace
+               && sa.metadata.name == "default"
+               && !sa.?automountServiceAccountToken.orValue(true)))
+      review_when: |
+        r.spec.?automountServiceAccountToken.orValue(
+          !data.serviceaccounts.items.exists(sa,
+            sa.metadata.namespace == r.metadata.namespace
+            && sa.metadata.name == r.spec.?serviceAccountName.orValue("default")
+            && !sa.?automountServiceAccountToken.orValue(true)))
+        && !((r.metadata.namespace + "/" + r.spec.?serviceAccountName.orValue("default")) in params.api_client_service_accounts)
+        && !(params.assume_bound_service_accounts_need_api
+             && (data.crb.items + data.rb.items).exists(b,
+                  b.?subjects.orValue([]).exists(s,
+                    s.kind == "ServiceAccount"
+                    && s.name == r.spec.?serviceAccountName.orValue("default")
+                    && s.?namespace.orValue(b.metadata.?namespace.orValue("")) == r.metadata.namespace)))
+      message: "Pod {{ .r.metadata.name }} in namespace {{ .r.metadata.namespace }} runs as the default service account with an automatically mounted API token"
+      review_message: "Pod {{ .r.metadata.name }} in namespace {{ .r.metadata.namespace }} mounts an API token for service account {{ .r.spec.serviceAccountName }}, which is not in api_client_service_accounts{{ if .params.assume_bound_service_accounts_need_api }} and has no RBAC bindings{{ end }}; confirm the workload calls the Kubernetes API or set automountServiceAccountToken: false"
+    evidence:
+      - r.spec.?serviceAccountName.orValue("default")
+      - r.spec.?automountServiceAccountToken.orValue(null)
+      - |
+        r.spec.?volumes.orValue([]).filter(v,
+          v.?projected.?sources.orValue([]).exists(src, src.?serviceAccountToken.hasValue()))
+        .map(v, v.name)
+    remediation: |
+      Set automountServiceAccountToken: false in the pod template (or on the service account) for workloads
+      that do not call the Kubernetes API, and run API clients under a dedicated service account:
+      kubectl patch serviceaccount <SA> -n <NAMESPACE> -p '{"automountServiceAccountToken": false}'
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
+    notes: |
+      Token mounting is computed as Kubernetes does it: the pod's automountServiceAccountToken wins,
+      otherwise the ServiceAccount's value, otherwise true. Whether a workload calls the Kubernetes API is not
+      observable, so the CIS judgement is approximated: a mounted token of the namespace default
+      ServiceAccount fails (an API client must use a dedicated ServiceAccount, any other pod must not mount
+      the token); a mounted token of a dedicated ServiceAccount passes when the account is listed in
+      api_client_service_accounts (namespace/name) or, with assume_bound_service_accounts_need_api, when it
+      holds a RoleBinding or ClusterRoleBinding; every other mounted token produces REVIEW. Set
+      assume_bound_service_accounts_need_api=false to review all mounted tokens. Explicit projected
+      serviceAccountToken volumes are shown as evidence but not judged, and pods created before a
+      ServiceAccount change keep their previous token mount until recreated.
+
+  - id: cis-gke-4.1.6
+    ref: "4.1.6"
+    title: Avoid granting cluster admin level access through the system:masters group
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: crb
+        kubectl: get clusterrolebindings -o json
+      - id: rb
+        kubectl: get rolebindings --all-namespaces -o json
+    resource:
+      from: data.crb.items + data.rb.items
+      kind: rbac.authorization.k8s.io/Binding
+      name: r.?metadata.?namespace.orValue("cluster") + "/" + r.metadata.name
+    params:
+      allowed_bindings: ["cluster-admin"]
+    check:
+      assert: |
+        !r.?subjects.orValue([]).exists(s, s.kind == "Group" && s.name == "system:masters")
+        || r.metadata.name in params.allowed_bindings
+      message: "Binding {{ .r.metadata.name }} grants {{ .r.roleRef.kind }}/{{ .r.roleRef.name }} to group system:masters"
+    evidence: [r.subjects, r.roleRef]
+    remediation: kubectl delete clusterrolebinding <NAME>  (keep the default cluster-admin binding)
+    references:
+      - https://kubernetes.io/docs/reference/access-authn-authz/rbac/
+    notes: |
+      Covers the observable part of the CIS audit: bindings referencing system:masters other than the
+      default cluster-admin binding. Whether any client certificate or identity mapping places users in
+      system:masters is not observable through the API; GKE legacy client certificates are covered by 5.8.1.
+
+  - id: cis-gke-4.1.7
+    ref: "4.1.7"
+    title: Limit use of the Bind, Impersonate and Escalate permissions in the Kubernetes cluster
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: cr
+        kubectl: get clusterroles -o json
+      - id: roles
+        kubectl: get roles --all-namespaces -o json
+      - id: crb
+        kubectl: get clusterrolebindings -o json
+      - id: rb
+        kubectl: get rolebindings --all-namespaces -o json
+    resource:
+      from: data.cr.items + data.roles.items
+      filter: |
+        !params.system_role_prefixes.exists(p, r.metadata.name.startsWith(p))
+        && !r.metadata.?labels.orValue({}).exists(k, k in params.system_label_keys)
+        && !r.metadata.?namespace.orValue("").matches(params.system_namespaces_regex)
+      kind: rbac.authorization.k8s.io/Role
+      name: r.?metadata.?namespace.orValue("cluster") + "/" + r.metadata.name
+    params:
+      sensitive_verbs: [bind, escalate, impersonate]
+      allowed_roles: []
+      broad_subject_regex: '^system:(anonymous|unauthenticated|authenticated|serviceaccounts(:.+)?)$'
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+      system_role_prefixes: ["system:", "gce:", "gmp-system:", "configsync.gke.io:", cloud-provider, stackdriver,
+        gke-metrics-agent, gke-managed-, netd, kube-dns, fluentbit-gke, event-exporter, metrics-server, calico,
+        cilium, anetd, ip-masq-agent, konnectivity, pdcsi, csi-gce-pd, gcsfusecsi, filestorecsi, gatekeeper-,
+        istiod-, istio-reader-, cnrm-]
+      system_label_keys: [kubernetes.io/bootstrapping, addonmanager.kubernetes.io/mode, gatekeeper.sh/system,
+        configmanagement.gke.io/system, cnrm.cloud.google.com/system]
+    check:
+      assert: |
+        (has(r.metadata.namespace) ? r.metadata.namespace + "/" + r.metadata.name : r.metadata.name) in params.allowed_roles
+        || !r.?rules.orValue([]).exists(rule, rule.?verbs.orValue([]).exists(v, v in params.sensitive_verbs))
+        || !(data.crb.items + data.rb.items).exists(b,
+             b.roleRef.name == r.metadata.name
+             && (has(r.metadata.namespace)
+                   ? b.roleRef.kind == "Role" && b.metadata.?namespace.orValue("") == r.metadata.namespace
+                   : b.roleRef.kind == "ClusterRole")
+             && b.?subjects.orValue([]).exists(s,
+                  (s.kind in ["User", "Group"] && s.name.matches(params.broad_subject_regex))
+                  || (s.kind == "ServiceAccount" && s.name == "default")))
+      review_when: |
+        !((has(r.metadata.namespace) ? r.metadata.namespace + "/" + r.metadata.name : r.metadata.name) in params.allowed_roles)
+        && r.?rules.orValue([]).exists(rule, rule.?verbs.orValue([]).exists(v, v in params.sensitive_verbs))
+      message: "{{ .r.kind }} {{ .r.metadata.name }} grants bind, escalate or impersonate and is bound to a cluster-wide group, anonymous users or a default service account"
+      review_message: "{{ .r.kind }} {{ .r.metadata.name }} grants bind, escalate or impersonate; confirm every bound subject is a tightly controlled administrative or platform identity, then add the role to allowed_roles"
+    evidence:
+      - r.?rules.orValue([]).filter(rule, rule.?verbs.orValue([]).exists(v, v in params.sensitive_verbs))
+      - |
+        (data.crb.items + data.rb.items).filter(b,
+          b.roleRef.name == r.metadata.name
+          && (has(r.metadata.namespace)
+                ? b.roleRef.kind == "Role" && b.metadata.?namespace.orValue("") == r.metadata.namespace
+                : b.roleRef.kind == "ClusterRole"))
+        .map(b, b.?metadata.?namespace.orValue("cluster") + "/" + b.metadata.name)
+      - |
+        (data.crb.items + data.rb.items).filter(b,
+          b.roleRef.name == r.metadata.name
+          && (has(r.metadata.namespace)
+                ? b.roleRef.kind == "Role" && b.metadata.?namespace.orValue("") == r.metadata.namespace
+                : b.roleRef.kind == "ClusterRole"))
+        .map(b, b.?subjects.orValue([]))
+    remediation: |
+      Remove bind, escalate and impersonate from roles that do not strictly need them:
+      kubectl edit clusterrole <ROLE>   or   kubectl edit role <ROLE> -n <NAMESPACE>
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+    notes: |
+      Mirrors the CIS jq query: Roles and ClusterRoles whose rules list bind, escalate or impersonate
+      (sensitive_verbs). Wildcard verbs are reported by 4.1.3. System roles are excluded as in 4.1.3; the
+      Kubernetes default admin and edit roles carry impersonate on serviceaccounts and cannot be changed, so
+      who they are bound to is covered by 4.1.1, 4.1.2 and 4.1.9. Whether a role needs these verbs is
+      organizational context: a matching role produces REVIEW unless it is listed in allowed_roles
+      (ClusterRole name, or namespace/name for a Role), and fails when it is bound to a cluster-wide group,
+      anonymous users, all service accounts of a namespace or a default service account. Evidence lists the
+      bindings and subjects that receive the role, replacing the manual binding trace.
+
+  - id: cis-gke-4.1.8
+    ref: "4.1.8"
+    title: Avoid binding RBAC roles to unauthenticated users and groups
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: critical
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: crb
+        kubectl: get clusterrolebindings -o json
+      - id: rb
+        kubectl: get rolebindings --all-namespaces -o json
+    resource:
+      from: data.crb.items + data.rb.items
+      kind: rbac.authorization.k8s.io/Binding
+      name: r.?metadata.?namespace.orValue("cluster") + "/" + r.metadata.name
+    params:
+      allowed_bindings: ["system:public-info-viewer"]
+    check:
+      assert: |
+        (has(r.metadata.namespace) ? r.metadata.namespace + "/" + r.metadata.name : r.metadata.name) in params.allowed_bindings
+        || !r.?subjects.orValue([]).exists(s,
+             (s.kind == "User" && s.name == "system:anonymous")
+             || (s.kind == "Group" && s.name == "system:unauthenticated"))
+      message: "Binding {{ .r.metadata.name }} grants {{ .r.roleRef.kind }}/{{ .r.roleRef.name }} to system:anonymous or system:unauthenticated"
+    evidence: [r.subjects, r.roleRef]
+    remediation: |
+      kubectl delete clusterrolebinding <NAME>   or   kubectl delete rolebinding <NAME> -n <NAMESPACE>
+      then grant any required access to authenticated, least-privilege subjects.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster
+    notes: |
+      Mirrors both CIS jq queries over all ClusterRoleBindings and RoleBindings: a subject User
+      system:anonymous or Group system:unauthenticated fails. The Kubernetes default ClusterRoleBinding
+      system:public-info-viewer binds system:unauthenticated to the read-only health and version endpoints
+      and is recreated by the API server, so it is listed in allowed_bindings (ClusterRoleBinding name, or
+      namespace/name for a RoleBinding); set allowed_bindings to [] for a literal reading of "no bindings
+      should be returned". GKE limited anonymous authentication complements but does not replace this check.
+
+  - id: cis-gke-4.1.9
+    ref: "4.1.9"
+    title: Avoid binding RBAC roles to all authenticated users
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: critical
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: crb
+        kubectl: get clusterrolebindings -o json
+      - id: rb
+        kubectl: get rolebindings --all-namespaces -o json
+    resource:
+      from: data.crb.items + data.rb.items
+      kind: rbac.authorization.k8s.io/Binding
+      name: r.?metadata.?namespace.orValue("cluster") + "/" + r.metadata.name
+    params:
+      allowed_bindings: ["system:basic-user", "system:discovery", "system:public-info-viewer"]
+    check:
+      assert: |
+        (has(r.metadata.namespace) ? r.metadata.namespace + "/" + r.metadata.name : r.metadata.name) in params.allowed_bindings
+        || !r.?subjects.orValue([]).exists(s, s.kind == "Group" && s.name == "system:authenticated")
+      message: "Binding {{ .r.metadata.name }} grants {{ .r.roleRef.kind }}/{{ .r.roleRef.name }} to every authenticated user (system:authenticated)"
+    evidence: [r.subjects, r.roleRef]
+    remediation: |
+      Bind the role to a specific user, Google Group or service account instead, validate, then remove the binding:
+      kubectl delete clusterrolebinding <NAME>   or   kubectl delete rolebinding <NAME> -n <NAMESPACE>
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
+    notes: |
+      Mirrors the CIS jq query over all ClusterRoleBindings and RoleBindings: a Group system:authenticated
+      subject fails, because in GKE that group contains every Google account. The three default
+      ClusterRoleBindings the benchmark expects (system:basic-user, system:discovery,
+      system:public-info-viewer) are listed in allowed_bindings (ClusterRoleBinding name, or namespace/name
+      for a RoleBinding). Bindings to system:unauthenticated are covered by 4.1.8.
+
+  - id: cis-gke-4.2.1
+    ref: "4.2.1"
+    title: Enforce baseline or restricted Pod Security Standards on workload namespaces
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: medium
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: namespaces
+        kubectl: get namespaces -o json
+      - id: pods
+        kubectl: get pods --all-namespaces -o json
+      - id: crds
+        kubectl: get crd -o json
+    resource:
+      from: data.namespaces.items
+      filter: |
+        !r.metadata.name.matches(params.system_namespaces_regex)
+        && (!params.only_namespaces_with_pods
+            || data.pods.items.exists(p, p.metadata.namespace == r.metadata.name))
+      kind: k8s.io/Namespace
+      name: r.metadata.name
+    params:
+      enforce_label: pod-security.kubernetes.io/enforce
+      allowed_levels: [baseline, restricted]
+      policy_crd_regex: '\.constraints\.gatekeeper\.sh$'
+      only_namespaces_with_pods: true
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+    check:
+      assert: |
+        (params.enforce_label in r.metadata.?labels.orValue({})
+         && r.metadata.labels[params.enforce_label] in params.allowed_levels)
+        || data.crds.items.exists(c, c.metadata.name.matches(params.policy_crd_regex))
+        || ctx.cluster.?autopilot.?enabled.orValue(false)
+      review_when: |
+        !(params.enforce_label in r.metadata.?labels.orValue({})
+          && r.metadata.labels[params.enforce_label] in params.allowed_levels)
+      message: "Namespace {{ .r.metadata.name }} does not set {{ .params.enforce_label }} to baseline or restricted and no Policy Controller or Gatekeeper constraints are installed"
+      review_message: "Namespace {{ .r.metadata.name }} does not set {{ .params.enforce_label }} to baseline or restricted; Policy Controller/Gatekeeper constraints or Autopilot built-in policies are present, so confirm they enforce at least the baseline profile for this namespace"
+    evidence:
+      - r.metadata.?labels.orValue({})
+      - size(data.crds.items.filter(c, c.metadata.name.matches(params.policy_crd_regex)))
+      - ctx.cluster.?autopilot.?enabled.orValue(false)
+    remediation: |
+      kubectl label --overwrite namespace <NAMESPACE> pod-security.kubernetes.io/enforce=baseline
+      (or =restricted; test with the warn and audit labels or a server-side dry run first)
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/podsecurityadmission
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster
+    notes: |
+      Population is every namespace outside system_namespaces_regex (the CIS filter excludes kube-system,
+      kube-public and kube-node-lease; GKE-managed and fleet add-on namespaces are added). With
+      only_namespaces_with_pods (default), namespaces that run no pods are skipped, replacing the manual
+      "does it contain user workloads" step. A namespace passes when pod-security.kubernetes.io/enforce is
+      one of allowed_levels; warn and audit labels do not count. Missing enforcement fails unless another
+      admission mechanism is detected: Policy Controller or Gatekeeper constraint CRDs (policy_crd_regex) or
+      an Autopilot cluster; then the result is REVIEW, because installed constraint templates do not prove
+      that baseline-equivalent constraints cover the namespace.
+
+  - id: cis-gke-4.3.1
+    ref: "4.3.1"
+    title: Enable NetworkPolicy enforcement with GKE Dataplane V2 or Calico
+    profile: L1
+    cis_assessment: manual
+    mode: deterministic
+    severity: medium
+    # Per the scope: cluster design convention, this rule reads the shared ctx.cluster network config and does not repeat a rule-level collect.
+    scope: cluster
+    check:
+      assert: |
+        ctx.cluster.?networkConfig.?datapathProvider.orValue("") == "ADVANCED_DATAPATH"
+        || ctx.cluster.?autopilot.?enabled.orValue(false)
+        || (ctx.cluster.?networkPolicy.?enabled.orValue(false)
+            && !ctx.cluster.?addonsConfig.?networkPolicyConfig.?disabled.orValue(false))
+      message: "Cluster {{ .cluster.name }} uses the legacy datapath without Calico NetworkPolicy enforcement (networkPolicy.enabled and the NetworkPolicy add-on must both be on)"
+    evidence:
+      - ctx.cluster.?networkConfig.?datapathProvider.orValue("")
+      - ctx.cluster.?networkPolicy.orValue({})
+      - ctx.cluster.?addonsConfig.?networkPolicyConfig.orValue({})
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --update-addons=NetworkPolicy=ENABLED
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --enable-network-policy
+      New or replacement clusters: gcloud container clusters create <CLUSTER> --enable-dataplane-v2
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/network-policy
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/dataplane-v2
+    notes: |
+      Evaluated from ctx.cluster, which holds the same fields as the CIS gcloud describe audit, so no
+      collection and no kubectl access are needed. Passes with GKE Dataplane V2
+      (networkConfig.datapathProvider ADVANCED_DATAPATH, always the case on Autopilot) or, on the legacy
+      datapath, when networkPolicy.enabled is true and the NetworkPolicy add-on is not disabled
+      (addonsConfig.networkPolicyConfig.disabled; the API omits false values, so absence means enabled).
+      networkPolicy.provider is always CALICO when enforcement is enabled and is reported as evidence only.
+
+  - id: cis-gke-4.3.2
+    ref: "4.3.2"
+    title: Define default deny NetworkPolicies for each workload namespace
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: namespaces
+        kubectl: get namespaces -o json
+      - id: pods
+        kubectl: get pods --all-namespaces -o json
+      - id: netpols
+        kubectl: get networkpolicies --all-namespaces -o json
+    resource:
+      from: data.namespaces.items
+      filter: |
+        !r.metadata.name.matches(params.system_namespaces_regex)
+        && (!params.only_namespaces_with_pods
+            || data.pods.items.exists(p, p.metadata.namespace == r.metadata.name))
+      kind: k8s.io/Namespace
+      name: r.metadata.name
+    params:
+      require_egress: false
+      only_namespaces_with_pods: true
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+    check:
+      assert: |
+        (ctx.cluster.?networkConfig.?datapathProvider.orValue("") == "ADVANCED_DATAPATH"
+         || ctx.cluster.?autopilot.?enabled.orValue(false)
+         || (ctx.cluster.?networkPolicy.?enabled.orValue(false)
+             && !ctx.cluster.?addonsConfig.?networkPolicyConfig.?disabled.orValue(false)))
+        && data.netpols.items.exists(np,
+             np.metadata.namespace == r.metadata.name
+             && size(np.spec.?podSelector.?matchLabels.orValue({})) == 0
+             && size(np.spec.?podSelector.?matchExpressions.orValue([])) == 0
+             && "Ingress" in np.spec.?policyTypes.orValue(["Ingress"])
+             && !np.spec.?ingress.orValue([]).exists(rule,
+                  size(rule.?from.orValue([])) == 0 && size(rule.?ports.orValue([])) == 0))
+        && (!params.require_egress
+            || data.netpols.items.exists(np,
+                 np.metadata.namespace == r.metadata.name
+                 && size(np.spec.?podSelector.?matchLabels.orValue({})) == 0
+                 && size(np.spec.?podSelector.?matchExpressions.orValue([])) == 0
+                 && "Egress" in np.spec.?policyTypes.orValue([])
+                 && !np.spec.?egress.orValue([]).exists(rule,
+                      size(rule.?to.orValue([])) == 0 && size(rule.?ports.orValue([])) == 0)))
+      message: "Namespace {{ .r.metadata.name }} has no default-deny NetworkPolicy (empty podSelector, Ingress policy type{{ if .params.require_egress }} and Egress policy type{{ end }}, no allow-all rule), or the cluster does not enforce NetworkPolicy"
+    evidence:
+      - data.netpols.items.filter(np, np.metadata.namespace == r.metadata.name).map(np, np.metadata.name)
+      - ctx.cluster.?networkConfig.?datapathProvider.orValue("")
+      - ctx.cluster.?networkPolicy.?enabled.orValue(false)
+    remediation: |
+      Apply a default-deny policy in each workload namespace, then add explicit allow policies:
+      kubectl apply -n <NAMESPACE> -f default-deny.yaml   (podSelector: {}, policyTypes: [Ingress, Egress])
+      Enforcement must be on first (see 4.3.1).
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/network-policy
+      - https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/network-policy
+    notes: |
+      The audit text of this item only checks the enforcement mechanism, so the assertion requires Dataplane
+      V2 or Calico enforcement (same logic as 4.3.1) and, per workload namespace, a default-deny policy: a
+      NetworkPolicy with an empty podSelector (no matchLabels or matchExpressions), Ingress in policyTypes and
+      no allow-all ingress rule (a rule with neither from nor ports). Such a policy isolates every pod, so
+      targeted allow rules in the same policy are accepted. require_egress=true also requires an equivalent
+      Egress policy; it is off by default because egress isolation needs DNS and metadata-server allowances
+      and the benchmark only names ingress explicitly. Workload namespaces are those outside
+      system_namespaces_regex that run pods (only_namespaces_with_pods).
+
+  - id: cis-gke-4.4.1
+    ref: "4.4.1"
+    title: Prefer using secrets as files over secrets as environment variables
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: pods
+        kubectl: get pods --all-namespaces -o json
+      - id: replicasets
+        kubectl: get replicasets --all-namespaces -o json
+    resource:
+      from: data.pods.items
+      filter: "!r.metadata.namespace.matches(params.system_namespaces_regex)"
+      kind: k8s.io/Pod
+      name: r.metadata.namespace + "/" + r.metadata.name
+      key: >-
+        r.metadata.namespace + "/" + (
+          r.metadata.?ownerReferences.orValue([]).filter(owner, owner.?controller.orValue(false)).size() == 0
+          ? r.metadata.name
+          : r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind == "ReplicaSet"
+            ? (
+              data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name).size() > 0
+              ? (
+                data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.?ownerReferences.orValue([]).filter(owner, owner.?controller.orValue(false)).size() > 0
+                ? (
+                  data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind
+                  + "/"
+                  + data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name
+                )
+                : r.metadata.name
+              )
+              : r.metadata.name
+            )
+            : r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind
+              + "/"
+              + r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name
+        )
+    params:
+      allowed_namespaces: []
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+    check:
+      assert: |
+        r.metadata.namespace in params.allowed_namespaces
+        || !(r.spec.?containers.orValue([]) + r.spec.?initContainers.orValue([])).exists(c,
+             c.?env.orValue([]).exists(e, e.?valueFrom.?secretKeyRef.hasValue())
+             || c.?envFrom.orValue([]).exists(ef, ef.?secretRef.hasValue()))
+      message: "Pod {{ .r.metadata.name }} in namespace {{ .r.metadata.namespace }} reads Kubernetes Secrets into environment variables (secretKeyRef or envFrom secretRef)"
+    evidence:
+      - |
+        (r.spec.?containers.orValue([]) + r.spec.?initContainers.orValue([])).filter(c,
+          c.?env.orValue([]).exists(e, e.?valueFrom.?secretKeyRef.hasValue())
+          || c.?envFrom.orValue([]).exists(ef, ef.?secretRef.hasValue()))
+        .map(c, c.name)
+    remediation: |
+      Read secrets from the Secret Manager API with Workload Identity Federation, or mount them as files
+      (Secret Manager add-on or a secret volume), then remove secretKeyRef/secretRef from the workload template.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/workload-identity-secrets
+      - https://docs.cloud.google.com/secret-manager/docs/secret-manager-managed-csi-component
+    notes: |
+      Mirrors the CIS jq query on running pods: any container or initContainer with
+      env[].valueFrom.secretKeyRef or envFrom[].secretRef fails. Pods are checked instead of their
+      controllers, so each replica of a workload produces its own result, and workloads scaled to zero or
+      CronJobs between runs are not seen. Namespaces in allowed_namespaces pass (documented exceptions);
+      system namespaces are not applicable.
+
+  - id: cis-gke-4.4.2
+    ref: "4.4.2"
+    title: Use Secret Manager for external workload secret storage
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: cluster
+    collect:
+      - id: crds
+        kubectl: get crd -o json
+        requires: [kubectl]
+    params:
+      external_secret_crds:
+        - externalsecrets.external-secrets.io
+        - secretproviderclasses.secrets-store.csi.x-k8s.io
+    check:
+      assert: |
+        ctx.cluster.?secretManagerConfig.?enabled.orValue(false)
+        || ctx.cluster.?workloadIdentityConfig.?workloadPool.orValue("") != ""
+        || !has(data.crds)
+        || data.crds.?items.orValue([]).exists(c, c.metadata.name in params.external_secret_crds)
+      review_when: |
+        !ctx.cluster.?secretManagerConfig.?enabled.orValue(false)
+        && !(has(data.crds) && data.crds.?items.orValue([]).exists(c, c.metadata.name in params.external_secret_crds))
+      message: "Cluster {{ .cluster.name }} has no Secret Manager add-on, no Workload Identity Federation and no external secret store integration, so workloads cannot use Secret Manager without static credentials"
+      review_message: "Cluster {{ .cluster.name }} has no Secret Manager add-on or external secret store integration detected; confirm workloads read sensitive values from Secret Manager through Workload Identity Federation rather than from Kubernetes Secrets"
+    evidence:
+      - ctx.cluster.?secretManagerConfig.orValue({})
+      - ctx.cluster.?workloadIdentityConfig.?workloadPool.orValue("")
+      - 'has(data.crds) ? data.crds.?items.orValue([]).filter(c, c.metadata.name in params.external_secret_crds).map(c, c.metadata.name) : []'
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --workload-pool=<PROJECT_ID>.svc.id.goog
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --enable-secret-manager
+      then move sensitive values from Kubernetes Secrets to Secret Manager.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/tutorials/workload-identity-secrets
+      - https://docs.cloud.google.com/secret-manager/docs/secret-manager-managed-csi-component
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity
+    notes: |
+      Follows the CIS audit fields (secretManagerConfig, workloadIdentityConfig.workloadPool) from
+      ctx.cluster, plus installed CRDs. Passes when the Secret Manager add-on is enabled or an external
+      secret store integration is installed (external_secret_crds: External Secrets Operator, Secrets Store
+      CSI driver). With only Workload Identity Federation, workloads may call the Secret Manager API directly,
+      which is not observable, so the result is REVIEW; with neither, no supported path exists and the rule
+      fails. Whether each sensitive value actually lives in Secret Manager stays a manual judgement; tune
+      external_secret_crds for other approved integrations. Only the CRD step needs kubectl; without it the
+      rule falls back to the cluster configuration and never fails on missing CRD data.
+
+  - id: cis-gke-4.5.1
+    ref: "4.5.1"
+    title: Enforce image provenance using Binary Authorization for GKE
+    profile: L2
+    cis_assessment: manual
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    collect:
+      - id: binauthz_policy
+        # Export the project-level Binary Authorization Policy JSON; the assert checks admission and enforcement mode against the same Policy fields.
+        gcloud: container binauthz policy export --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      enforcing_modes:
+        - PROJECT_SINGLETON_POLICY_ENFORCE
+        - POLICY_BINDINGS_AND_PROJECT_SINGLETON_POLICY_ENFORCE
+    check:
+      assert: |
+        (ctx.cluster.?binaryAuthorization.?evaluationMode.orValue("EVALUATION_MODE_UNSPECIFIED") == "EVALUATION_MODE_UNSPECIFIED"
+           ? ctx.cluster.?binaryAuthorization.?enabled.orValue(false)
+           : ctx.cluster.binaryAuthorization.evaluationMode in params.enforcing_modes)
+        && ([(ctx.cluster.location + "." + ctx.cluster.name) in data.binauthz_policy.?clusterAdmissionRules.orValue({})
+               ? data.binauthz_policy.clusterAdmissionRules[ctx.cluster.location + "." + ctx.cluster.name]
+               : data.binauthz_policy.?defaultAdmissionRule.orValue({})]
+            + data.binauthz_policy.?kubernetesNamespaceAdmissionRules.orValue({}).map(k, data.binauthz_policy.kubernetesNamespaceAdmissionRules[k])
+            + data.binauthz_policy.?kubernetesServiceAccountAdmissionRules.orValue({}).map(k, data.binauthz_policy.kubernetesServiceAccountAdmissionRules[k])
+            + data.binauthz_policy.?istioServiceIdentityAdmissionRules.orValue({}).map(k, data.binauthz_policy.istioServiceIdentityAdmissionRules[k]))
+           .exists(rule,
+             rule.?evaluationMode.orValue("ALWAYS_ALLOW") != "ALWAYS_ALLOW"
+             && rule.?enforcementMode.orValue("") == "ENFORCED_BLOCK_AND_AUDIT_LOG")
+      message: "Cluster {{ .cluster.name }} does not enforce Binary Authorization, or the applicable project policy allows all images or only runs in dry-run mode"
+    evidence:
+      - ctx.cluster.?binaryAuthorization.orValue({})
+      - data.binauthz_policy.?defaultAdmissionRule.orValue({})
+      - data.binauthz_policy.?clusterAdmissionRules.orValue({})
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --binauthz-evaluation-mode=PROJECT_SINGLETON_POLICY_ENFORCE
+      gcloud container binauthz policy import <POLICY_FILE>   (default or cluster rule: REQUIRE_ATTESTATION or
+      ALWAYS_DENY with allowlisted trusted registries, enforcementMode ENFORCED_BLOCK_AND_AUDIT_LOG)
+    references:
+      - https://docs.cloud.google.com/binary-authorization/docs/overview
+      - https://docs.cloud.google.com/binary-authorization/docs/enable-cluster
+    notes: |
+      Two checks replace the CIS manual review. Enforcement: binaryAuthorization.evaluationMode must be in
+      enforcing_modes, or the deprecated binaryAuthorization.enabled must be true when evaluationMode is
+      unset. POLICY_BINDINGS alone only runs continuous validation (audit) and does not block deployments,
+      so it is not in enforcing_modes by default. Policy: the project policy is read through the REST API
+      (gcloud only offers export) to confirm it does not simply allow all images; the admission rule for
+      this cluster (clusterAdmissionRules["<location>.<cluster>"], else defaultAdmissionRule) or any
+      namespace, service account or Istio identity scoped rule must use an evaluationMode other than
+      ALWAYS_ALLOW with enforcementMode ENFORCED_BLOCK_AND_AUDIT_LOG. on_error: empty treats a disabled
+      Binary Authorization API as the default allow-all policy, so the API is not listed in services. Which
+      attestors and allowlist patterns count as approved is not verified.
+
+  - id: cis-gke-4.6.1
+    ref: "4.6.1"
+    title: Use namespaces to separate workload administration and resource governance
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: namespaces
+        kubectl: get namespaces -o json
+      - id: pods
+        kubectl: get pods --all-namespaces -o json
+      - id: quotas
+        kubectl: get resourcequotas --all-namespaces -o json
+      - id: limitranges
+        kubectl: get limitranges --all-namespaces -o json
+    resource:
+      from: data.namespaces.items
+      filter: |
+        !r.metadata.name.matches(params.system_namespaces_regex)
+        && (!params.only_namespaces_with_pods
+            || data.pods.items.exists(p, p.metadata.namespace == r.metadata.name))
+      kind: k8s.io/Namespace
+      name: r.metadata.name
+    params:
+      required_labels: []
+      only_namespaces_with_pods: true
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+    check:
+      assert: |
+        !(r.metadata.name == "default" && data.pods.items.exists(p, p.metadata.namespace == "default"))
+        && params.required_labels.all(l, l in r.metadata.?labels.orValue({}))
+      review_when: |
+        !data.quotas.items.exists(q, q.metadata.namespace == r.metadata.name)
+        && !data.limitranges.items.exists(l, l.metadata.namespace == r.metadata.name)
+      message: 'Namespace {{ .r.metadata.name }} {{ if eq .r.metadata.name "default" }}runs workloads; move them to dedicated namespaces{{ else }}lacks a label from required_labels {{ .params.required_labels }}{{ end }}'
+      review_message: "Workload namespace {{ .r.metadata.name }} has no ResourceQuota or LimitRange; confirm the namespace-level resource governance this tenant needs"
+    evidence:
+      - r.metadata.?labels.orValue({})
+      - data.quotas.items.filter(q, q.metadata.namespace == r.metadata.name).map(q, q.metadata.name)
+      - data.limitranges.items.filter(l, l.metadata.namespace == r.metadata.name).map(l, l.metadata.name)
+    remediation: |
+      kubectl create namespace <NAMESPACE>   and move workloads out of default
+      kubectl create quota <NAME> -n <NAMESPACE> --hard=cpu=<N>,memory=<SIZE>,pods=<N>
+      kubectl label namespace <NAMESPACE> owner=<TEAM> env=<ENV>
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/restrict-resources-access-by-namespace
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+    notes: |
+      Population is the workload namespaces: outside system_namespaces_regex and, with
+      only_namespaces_with_pods (default), running at least one pod. Pods in the default namespace fail
+      because the audit requires dedicated namespaces (4.6.4 checks the same per pod at L2), as does a
+      namespace missing any label in required_labels (ownership, environment or tenant labels; empty by
+      default, set it to enforce your labeling standard). A workload namespace with neither a ResourceQuota
+      nor a LimitRange produces REVIEW, because the governance controls a namespace needs depend on the
+      organization. RBAC, NetworkPolicy and Pod Security labels are checked by 4.1.x, 4.3.2 and 4.2.1.
+
+  - id: cis-gke-4.6.2
+    ref: "4.6.2"
+    title: Require RuntimeDefault seccomp or approved custom profiles for workload pods
+    profile: L2
+    cis_assessment: manual
+    mode: deterministic
+    severity: low
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: pods
+        kubectl: get pods --all-namespaces -o json
+      - id: replicasets
+        kubectl: get replicasets --all-namespaces -o json
+    resource:
+      from: data.pods.items
+      filter: "!r.metadata.namespace.matches(params.system_namespaces_regex)"
+      kind: k8s.io/Pod
+      name: r.metadata.namespace + "/" + r.metadata.name
+      key: >-
+        r.metadata.namespace + "/" + (
+          r.metadata.?ownerReferences.orValue([]).filter(owner, owner.?controller.orValue(false)).size() == 0
+          ? r.metadata.name
+          : r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind == "ReplicaSet"
+            ? (
+              data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name).size() > 0
+              ? (
+                data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.?ownerReferences.orValue([]).filter(owner, owner.?controller.orValue(false)).size() > 0
+                ? (
+                  data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind
+                  + "/"
+                  + data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name
+                )
+                : r.metadata.name
+              )
+              : r.metadata.name
+            )
+            : r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind
+              + "/"
+              + r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name
+        )
+    params:
+      allowed_profile_types: [RuntimeDefault, Localhost]
+      allowed_namespaces: []
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+    check:
+      assert: |
+        r.metadata.namespace in params.allowed_namespaces
+        || (r.spec.?containers.orValue([]) + r.spec.?initContainers.orValue([])).all(c,
+             c.?securityContext.?seccompProfile.?type.orValue(
+               r.spec.?securityContext.?seccompProfile.?type.orValue(
+                 ctx.cluster.?autopilot.?enabled.orValue(false) ? "RuntimeDefault" : "unset"))
+             in params.allowed_profile_types)
+      message: "Pod {{ .r.metadata.name }} in namespace {{ .r.metadata.namespace }} has containers whose seccomp profile is unset or Unconfined"
+    evidence:
+      - r.spec.?securityContext.?seccompProfile.orValue({})
+      - |
+        (r.spec.?containers.orValue([]) + r.spec.?initContainers.orValue([])).map(c,
+          c.name + "=" + c.?securityContext.?seccompProfile.?type.orValue(
+            r.spec.?securityContext.?seccompProfile.?type.orValue("unset")))
+    remediation: |
+      Set securityContext.seccompProfile.type: RuntimeDefault at pod level in the workload template
+      (Deployment, StatefulSet, DaemonSet, Job, CronJob or its Helm/GitOps source) and redeploy.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/seccomp-in-gke
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/podsecurityadmission
+    notes: |
+      Mirrors the CIS jq query: for every container and initContainer, the effective seccomp profile
+      (container securityContext, else pod securityContext) must be in allowed_profile_types; unset and
+      Unconfined fail. On Autopilot, GKE applies RuntimeDefault to workloads that set no profile, so unset
+      counts as RuntimeDefault there. Localhost passes as in the CIS command but must be approved and present
+      on the nodes; drop it from allowed_profile_types to require RuntimeDefault only. allowed_namespaces
+      lists namespaces with approved exceptions; system namespaces are not applicable.
+
+  - id: cis-gke-4.6.3
+    ref: "4.6.3"
+    title: Require hardened security contexts for all workload Pods and containers
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: high
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: pods
+        kubectl: get pods --all-namespaces -o json
+      - id: replicasets
+        kubectl: get replicasets --all-namespaces -o json
+    resource:
+      from: data.pods.items
+      filter: "!r.metadata.namespace.matches(params.system_namespaces_regex)"
+      kind: k8s.io/Pod
+      name: r.metadata.namespace + "/" + r.metadata.name
+      key: >-
+        r.metadata.namespace + "/" + (
+          r.metadata.?ownerReferences.orValue([]).filter(owner, owner.?controller.orValue(false)).size() == 0
+          ? r.metadata.name
+          : r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind == "ReplicaSet"
+            ? (
+              data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name).size() > 0
+              ? (
+                data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.?ownerReferences.orValue([]).filter(owner, owner.?controller.orValue(false)).size() > 0
+                ? (
+                  data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind
+                  + "/"
+                  + data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name
+                )
+                : r.metadata.name
+              )
+              : r.metadata.name
+            )
+            : r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind
+              + "/"
+              + r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name
+        )
+    params:
+      allowed_namespaces: []
+      require_read_only_root: false
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+    check:
+      assert: |
+        r.metadata.namespace in params.allowed_namespaces
+        || (!r.spec.?hostNetwork.orValue(false)
+            && !r.spec.?hostPID.orValue(false)
+            && !r.spec.?hostIPC.orValue(false)
+            && !(r.spec.?containers.orValue([]) + r.spec.?initContainers.orValue([])).exists(c,
+                 c.?securityContext.?privileged.orValue(false)))
+      review_when: |
+        !(r.metadata.namespace in params.allowed_namespaces)
+        && (r.spec.?containers.orValue([]) + r.spec.?initContainers.orValue([])).exists(c,
+             c.?securityContext.?allowPrivilegeEscalation.orValue(true)
+             || !(c.?securityContext.?runAsNonRoot.orValue(r.spec.?securityContext.?runAsNonRoot.orValue(false))
+                  || c.?securityContext.?runAsUser.orValue(r.spec.?securityContext.?runAsUser.orValue(0)) > 0)
+             || !c.?securityContext.?capabilities.?drop.orValue([]).exists(d, d.upperAscii() == "ALL")
+             || (params.require_read_only_root && !c.?securityContext.?readOnlyRootFilesystem.orValue(false)))
+      message: "Pod {{ .r.metadata.name }} in namespace {{ .r.metadata.namespace }} runs a privileged container or uses hostNetwork, hostPID or hostIPC"
+      review_message: "Pod {{ .r.metadata.name }} in namespace {{ .r.metadata.namespace }} has containers without allowPrivilegeEscalation=false, a non-root user, capabilities.drop [ALL]{{ if .params.require_read_only_root }} or readOnlyRootFilesystem=true{{ end }}; harden the security context or document an approved exception"
+    evidence:
+      - r.spec.?securityContext.orValue({})
+      - |
+        (r.spec.?containers.orValue([]) + r.spec.?initContainers.orValue([]))
+        .map(c, {c.name: c.?securityContext.orValue({})})
+      - '[r.spec.?hostNetwork.orValue(false), r.spec.?hostPID.orValue(false), r.spec.?hostIPC.orValue(false)]'
+    remediation: |
+      In the workload template set privileged: false, allowPrivilegeEscalation: false, runAsNonRoot: true,
+      capabilities.drop: ["ALL"] (and readOnlyRootFilesystem: true where supported), remove hostNetwork,
+      hostPID and hostIPC, and enforce it with Pod Security Admission (restricted) or Policy Controller.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/podsecurityadmission
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/security-overview
+    notes: |
+      Evaluated per container (containers and initContainers) of pods outside system namespaces. Privileged
+      containers and pod-level hostNetwork, hostPID or hostIPC fail: they give direct host access and CIS
+      asks to remove them unless explicitly required (approve with allowed_namespaces or a profile
+      exemption). The other hardening settings are noisy and workload-dependent, so they produce REVIEW:
+      allowPrivilegeEscalation must be false, the container must run as non-root (runAsNonRoot true or
+      runAsUser > 0, container value overriding the pod value), capabilities.drop must contain ALL, and
+      readOnlyRootFilesystem must be true only when require_read_only_root is set (the benchmark does not
+      list it, so it is off by default). The seccomp profile is checked by 4.6.2.
+
+  - id: cis-gke-4.6.4
+    ref: "4.6.4"
+    title: Avoid deploying workloads in the default namespace
+    profile: L2
+    cis_assessment: manual
+    mode: deterministic
+    severity: low
+    scope: cluster
+    requires: [kubectl]
+    collect:
+      - id: pods
+        kubectl: get pods --all-namespaces -o json
+      - id: replicasets
+        kubectl: get replicasets --all-namespaces -o json
+    resource:
+      from: data.pods.items
+      filter: "!r.metadata.namespace.matches(params.system_namespaces_regex)"
+      kind: k8s.io/Pod
+      name: r.metadata.namespace + "/" + r.metadata.name
+      key: >-
+        r.metadata.namespace + "/" + (
+          r.metadata.?ownerReferences.orValue([]).filter(owner, owner.?controller.orValue(false)).size() == 0
+          ? r.metadata.name
+          : r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind == "ReplicaSet"
+            ? (
+              data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name).size() > 0
+              ? (
+                data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.?ownerReferences.orValue([]).filter(owner, owner.?controller.orValue(false)).size() > 0
+                ? (
+                  data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind
+                  + "/"
+                  + data.replicasets.items.filter(rs, rs.metadata.namespace == r.metadata.namespace && rs.metadata.name == r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name)[0].metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name
+                )
+                : r.metadata.name
+              )
+              : r.metadata.name
+            )
+            : r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].kind
+              + "/"
+              + r.metadata.ownerReferences.filter(owner, owner.?controller.orValue(false))[0].name
+        )
+      empty: pass
+    params:
+      system_namespaces_regex: '^(kube-system|kube-public|kube-node-lease|gke-.*|gmp-.*|config-management-.*|istio-system|asm-.*|gatekeeper-system|cnrm-system|resource-group-system|composer-.*)$'
+    check:
+      assert: r.metadata.namespace != "default"
+      message: "Pod {{ .r.metadata.name }} runs in the default namespace"
+    evidence:
+      - r.metadata.?ownerReferences.orValue([]).map(o, o.kind + "/" + o.name)
+    remediation: |
+      Create a dedicated namespace (kubectl create namespace <NAMESPACE>), redeploy the workload there with
+      an explicit metadata.namespace, then delete it from default.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/best-practices/rbac
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/multitenancy-overview
+    notes: |
+      The CIS audit lists every object in the default namespace and asks which ones are workloads; running
+      pods are the workloads checked here. Population is the pods outside system namespaces, so each pod in
+      default fails and the rule passes when there are no workload pods at all (empty: pass). Services,
+      ConfigMaps, Secrets and controllers scaled to zero in default are not checked. Exempt approved pods
+      through the profile.

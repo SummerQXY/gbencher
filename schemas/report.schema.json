@@ -1,0 +1,314 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:gbench:schema:report:1",
+  "title": "gbench scan report",
+  "description": "Canonical scan report. This is the producer's contract: unknown keys are rejected, and a minor schema_version bump adds fields or enum values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scan", "summary", "rule_summaries", "results", "collectors"],
+  "properties": {
+    "schema_version": { "$ref": "#/$defs/schema_version" },
+    "scan": { "$ref": "#/$defs/scan" },
+    "summary": { "$ref": "#/$defs/summary" },
+    "rule_summaries": { "type": "array", "items": { "$ref": "#/$defs/rule_summary" } },
+    "results": { "type": "array", "items": { "$ref": "#/$defs/result" } },
+    "collectors": { "type": "array", "items": { "$ref": "#/$defs/collector" } }
+  },
+  "$defs": {
+    "schema_version": { "type": "string", "pattern": "^1\\.[0-9]+$" },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "sha256_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "finding_key": {
+      "description": "fk1: followed by the first 32 hex characters of sha256(rule.id + \"\\n\" + target.key + \"\\n\" + resource.key).",
+      "type": "string",
+      "pattern": "^fk1:[0-9a-f]{32}$"
+    },
+    "rule_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*[a-z0-9](\\.[0-9]+)*$" },
+    "rule_ref": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)*$" },
+    "benchmark_selector": { "type": "string", "pattern": "^[a-z][a-z0-9-]*@[^@\\s]+$" },
+    "nonempty_string": { "type": "string", "minLength": 1 },
+    "nullable_string": { "type": ["string", "null"] },
+    "count": { "type": "integer", "minimum": 0 },
+    "level": { "type": "string", "enum": ["L1", "L2"] },
+    "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+    "mode": { "type": "string", "enum": ["deterministic", "contextual"] },
+    "verification": { "type": "string", "enum": ["none", "static", "fixture", "live"] },
+    "capability": { "type": "string", "enum": ["kubectl", "workspace-admin", "org-access"] },
+    "assessment_status": {
+      "type": "string",
+      "enum": ["PASS", "FAIL", "REVIEW", "NOT_APPLICABLE", "SKIPPED", "ERROR"]
+    },
+    "rule_status": {
+      "description": "MIXED appears only in rule_summaries, when the rule's results do not share one status.",
+      "type": "string",
+      "enum": ["PASS", "FAIL", "REVIEW", "NOT_APPLICABLE", "SKIPPED", "ERROR", "MIXED"]
+    },
+    "collection_status": { "type": "string", "enum": ["SUCCEEDED", "PARTIAL", "FAILED", "NOT_RUN"] },
+    "status_counts": {
+      "description": "Result counts per assessment status; statuses without results may be omitted.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "PASS": { "$ref": "#/$defs/count" },
+        "FAIL": { "$ref": "#/$defs/count" },
+        "REVIEW": { "$ref": "#/$defs/count" },
+        "NOT_APPLICABLE": { "$ref": "#/$defs/count" },
+        "SKIPPED": { "$ref": "#/$defs/count" },
+        "ERROR": { "$ref": "#/$defs/count" }
+      }
+    },
+    "scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "started_at", "finished_at", "status", "tool", "environment", "identity", "targets", "selection", "coverage"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^scan-[0-9]{8}T[0-9]{6}Z-[0-9A-Za-z]+$" },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "finished_at": { "$ref": "#/$defs/timestamp" },
+        "status": {
+          "description": "completed: every unit was evaluated or not applicable; completed_with_gaps: some unit is SKIPPED or ERROR.",
+          "type": "string",
+          "enum": ["completed", "completed_with_gaps"]
+        },
+        "tool": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version", "ruleset_hash", "ruleset_source"],
+          "properties": {
+            "name": { "$ref": "#/$defs/nonempty_string" },
+            "version": { "$ref": "#/$defs/nonempty_string" },
+            "ruleset_hash": { "$ref": "#/$defs/sha256_digest" },
+            "ruleset_source": { "type": "string", "enum": ["embedded", "external"] }
+          }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gcloud_version", "kubectl_version", "os", "arch"],
+          "properties": {
+            "gcloud_version": { "$ref": "#/$defs/nonempty_string" },
+            "kubectl_version": { "description": "null when kubectl was not used.", "$ref": "#/$defs/nullable_string" },
+            "os": { "$ref": "#/$defs/nonempty_string" },
+            "arch": { "$ref": "#/$defs/nonempty_string" }
+          }
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["account", "impersonated", "quota_project"],
+          "properties": {
+            "account": { "$ref": "#/$defs/nonempty_string" },
+            "adc_account": { "description": "Verified Workspace ADC principal when workspace-admin was enabled; null or absent when unavailable.", "$ref": "#/$defs/nullable_string" },
+            "impersonated": { "$ref": "#/$defs/nullable_string" },
+            "quota_project": { "$ref": "#/$defs/nullable_string" }
+          }
+        },
+        "targets": { "type": "array", "items": { "$ref": "#/$defs/scan_target" } },
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["profile_hash", "benchmarks", "levels", "capabilities", "rules_selected"],
+          "properties": {
+            "profile_hash": { "$ref": "#/$defs/sha256_digest" },
+            "benchmarks": { "type": "array", "items": { "$ref": "#/$defs/benchmark_selector" } },
+            "levels": { "type": "array", "items": { "$ref": "#/$defs/level" } },
+            "capabilities": { "type": "array", "items": { "$ref": "#/$defs/capability" } },
+            "rules_selected": { "$ref": "#/$defs/count" }
+          }
+        },
+        "coverage": {
+          "description": "evaluated + not_applicable + skipped + error equals units. A unit takes the worst outcome of its results: error > skipped > evaluated > not_applicable.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["units", "evaluated", "not_applicable", "skipped", "error"],
+          "properties": {
+            "units": { "$ref": "#/$defs/count" },
+            "evaluated": { "$ref": "#/$defs/count" },
+            "not_applicable": { "$ref": "#/$defs/count" },
+            "skipped": { "$ref": "#/$defs/count" },
+            "error": { "$ref": "#/$defs/count" }
+          }
+        }
+      }
+    },
+    "scan_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "number", "organization", "clusters"],
+      "properties": {
+        "type": { "type": "string", "enum": ["project"] },
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "number": { "description": "null when the project number could not be resolved.", "$ref": "#/$defs/nullable_string" },
+        "organization": { "description": "null when the project has no resolvable organization.", "$ref": "#/$defs/nullable_string" },
+        "clusters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "names", "unreachable"],
+          "properties": {
+            "status": { "$ref": "#/$defs/collection_status" },
+            "names": { "type": "array", "items": { "type": "string" } },
+            "unreachable": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["results_total", "status_counts"],
+      "properties": {
+        "results_total": { "$ref": "#/$defs/count" },
+        "status_counts": { "$ref": "#/$defs/status_counts" }
+      }
+    },
+    "rule_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule_id", "rule_hash", "ref", "title", "profile", "severity", "mode", "verification", "effective_params", "status", "status_counts"],
+      "properties": {
+        "rule_id": { "$ref": "#/$defs/rule_id" },
+        "rule_hash": { "$ref": "#/$defs/sha256_digest" },
+        "ref": { "$ref": "#/$defs/rule_ref" },
+        "title": { "$ref": "#/$defs/nonempty_string" },
+        "profile": { "$ref": "#/$defs/level" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "mode": { "$ref": "#/$defs/mode" },
+        "verification": { "$ref": "#/$defs/verification" },
+        "effective_params": { "description": "Params in effect for the scan, overrides included.", "type": "object" },
+        "status": { "$ref": "#/$defs/rule_status" },
+        "status_counts": { "$ref": "#/$defs/status_counts" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": ["assessment"],
+            "properties": {"assessment": {"required": ["status"], "properties": {"status": {"const": "FAIL"}}}}
+          },
+          "then": {
+            "properties": {"collection": {"required": ["status"], "properties": {"status": {"enum": ["SUCCEEDED", "PARTIAL"]}}}}
+          }
+        }
+      ],
+      "required": ["id", "finding_key", "rule", "target", "resource", "collection", "assessment", "evidence"],
+      "properties": {
+        "id": { "description": "Reference inside this report only; never compare it across scans.", "$ref": "#/$defs/nonempty_string" },
+        "finding_key": { "$ref": "#/$defs/finding_key" },
+        "rule": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "ref", "title", "profile", "severity", "mode"],
+          "properties": {
+            "id": { "$ref": "#/$defs/rule_id" },
+            "ref": { "$ref": "#/$defs/rule_ref" },
+            "title": { "$ref": "#/$defs/nonempty_string" },
+            "profile": { "$ref": "#/$defs/level" },
+            "severity": { "$ref": "#/$defs/severity" },
+            "mode": { "$ref": "#/$defs/mode" }
+          }
+        },
+        "target": { "$ref": "#/$defs/result_target" },
+        "resource": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name", "key"],
+          "properties": {
+            "kind": { "$ref": "#/$defs/nonempty_string" },
+            "name": { "description": "Normalized name, for display.", "type": "string" },
+            "key": { "description": "Stable identity of the resource, an input of finding_key.", "type": "string" },
+            "members": { "description": "Number of merged elements; omitted when nothing was merged.", "type": "integer", "minimum": 1 }
+          }
+        },
+        "collection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "collector_ids", "error"],
+          "properties": {
+            "status": { "$ref": "#/$defs/collection_status" },
+            "collector_ids": { "type": "array", "items": { "type": "string" } },
+            "error": {
+              "description": "null unless the collection failed.",
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["class", "summary"],
+              "properties": {
+                "class": { "$ref": "#/$defs/nonempty_string" },
+                "summary": { "description": "Redacted summary.", "type": "string" }
+              }
+            }
+          }
+        },
+        "assessment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "message", "review_reason"],
+          "properties": {
+            "status": { "$ref": "#/$defs/assessment_status" },
+            "message": { "type": "string" },
+            "review_reason": { "$ref": "#/$defs/nullable_string" }
+          }
+        },
+        "evidence": {
+          "description": "At most 50 entries; a value longer than 4 KiB once serialized is truncated and flagged.",
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["expr", "value", "collector_id"],
+            "properties": {
+              "expr": { "$ref": "#/$defs/nonempty_string" },
+              "value": {},
+              "collector_id": { "type": "string" },
+              "truncated": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "result_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "key"],
+      "properties": {
+        "type": { "type": "string", "enum": ["project", "organization", "cluster"] },
+        "key": { "$ref": "#/$defs/nonempty_string" },
+        "project_id": { "type": "string" },
+        "cluster": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["type"], "properties": { "type": { "enum": ["project", "cluster"] } } },
+          "then": { "required": ["project_id"] }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "cluster" } } },
+          "then": { "required": ["cluster"] }
+        }
+      ]
+    },
+    "collector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "command", "started_at", "duration_ms", "status", "exit_code", "error_class", "error"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "type": { "$ref": "#/$defs/nonempty_string" },
+        "command": { "description": "Rendered command or URL, redacted. Raw output is never recorded.", "$ref": "#/$defs/nonempty_string" },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "duration_ms": { "$ref": "#/$defs/count" },
+        "status": { "$ref": "#/$defs/collection_status" },
+        "exit_code": { "type": ["integer", "null"] },
+        "error_class": { "$ref": "#/$defs/nullable_string" },
+        "error": { "description": "Redacted summary.", "$ref": "#/$defs/nullable_string" }
+      }
+    }
+  }
+}

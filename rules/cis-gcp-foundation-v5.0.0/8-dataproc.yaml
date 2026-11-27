@@ -1,0 +1,54 @@
+dsl_version: 1
+benchmark:
+  id: cis-gcp-foundation
+  version: "5.0.0"
+  section: "8"
+  title: Dataproc
+rules:
+  - id: cis-gcp-8.1
+    ref: "8.1"
+    title: Ensure that Dataproc Cluster is encrypted using Customer-Managed Encryption Key
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [dataproc.googleapis.com, compute.googleapis.com]
+    collect:
+      - id: regions
+        gcloud: compute regions list --project={{ .project }} --format=json
+      - id: clusters
+        foreach: data.regions
+        as: region
+        gcloud: dataproc clusters list --region={{ .region.name }} --project={{ .project }} --format=json
+        on_error: empty
+    resource:
+      from: data.clusters.flatten()
+      filter: '!has(r.virtualClusterConfig)'
+      kind: dataproc.googleapis.com/Cluster
+      name: 'r.?labels[?"goog-dataproc-location"].orValue("unknown-region") + "/" + r.clusterName'
+    check:
+      assert: |
+        r.?config.?encryptionConfig.?gcePdKmsKeyName.orValue("") != ""
+        || r.?config.?encryptionConfig.?kmsKey.orValue("") != ""
+      message: "Dataproc cluster {{ .r.clusterName }} does not use a customer-managed encryption key (config.encryptionConfig has neither gcePdKmsKeyName nor kmsKey)"
+    evidence: [r.config.encryptionConfig, r.status.state]
+    remediation: |
+      gcloud dataproc clusters create <CLUSTER_NAME> --region=<REGION> --gce-pd-kms-key=<KMS_KEY_NAME>
+      (first grant roles/cloudkms.cryptoKeyEncrypterDecrypter on the key to
+      service-<PROJECT_NUMBER>@compute-system.iam.gserviceaccount.com), migrate workloads, then
+      gcloud dataproc clusters delete <OLD_CLUSTER_NAME> --region=<REGION>
+    references:
+      - https://cloud.google.com/docs/security/encryption/default-encryption
+    notes: |
+      Dataproc clusters are regional: clusters are listed in every region from compute regions list,
+      and a region whose call fails with SERVICE_DISABLED, NOT_FOUND or FAILED_PRECONDITION
+      contributes no clusters (on_error: empty); a region whose call fails for any other reason,
+      including a transient failure, is reported as an error for that region and the other regions
+      are still evaluated. Passes when
+      config.encryptionConfig.gcePdKmsKeyName (persistent disks, the field in the CIS audit) or
+      config.encryptionConfig.kmsKey (newer field that also covers job arguments) is set; the default
+      is Google-managed keys, so absence fails. Dataproc on GKE virtual clusters are skipped because
+      their storage is governed by the GKE node pools. The Cloud Storage staging and temp buckets are
+      not checked. The resource name is <region>/<clusterName>, with the region taken from the
+      goog-dataproc-location label that Dataproc applies to clusters.

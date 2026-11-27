@@ -1,0 +1,31 @@
+# Lint fixture: the only defect is a step id that is used twice in one rule.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-step-id-duplicate-1
+    ref: "1.1"
+    title: Fixture with a step id that is used twice
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+      - id: instances
+        gcloud: compute disks list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: r.name
+    check:
+      assert: r.status == "RUNNING"
+      message: "Instance {{ .r.name }} is not running"
+    remediation: Start the instance.
+    notes: Fixture for the lint tests.

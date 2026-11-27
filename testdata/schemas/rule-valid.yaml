@@ -1,0 +1,56 @@
+# Control document: uses dsl_version, evaluate_per, params_constraints, resource.key and
+# cross_project, and none of the step types or capabilities the schema rejects.
+dsl_version: 1
+benchmark:
+  id: cis-example
+  version: "1.0.0"
+  section: "1"
+  title: Example Rules
+rules:
+  - id: cis-example-1.1
+    ref: "1.1"
+    title: Ensure example firewall rules are restricted
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: firewalls
+        gcloud: compute firewall-rules list --project={{ .project }} --format=json
+        cross_project: true
+    resource:
+      from: data.firewalls
+      kind: compute.googleapis.com/Firewall
+      name: r.name
+      key: r.name
+    params:
+      freshness_days: 30
+      namespace: default
+      level: strict
+    params_constraints:
+      freshness_days: {minimum: 1, maximum: 365}
+      namespace: {pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", max_length: 63}
+      level: {enum: [strict, relaxed]}
+    check:
+      assert: r.direction != "INGRESS"
+    remediation: Delete or restrict the firewall rule.
+    notes: Fixture for schema tests.
+  - id: cis-example-1.2
+    ref: "1.2"
+    title: Ensure the organization policy is set
+    profile: L1
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: organization
+    evaluate_per: organization
+    requires: [org-access]
+    collect:
+      - id: policies
+        gcloud: resource-manager org-policies list --organization={{ .organization }} --format=json
+    check:
+      assert: size(data.policies) > 0
+    remediation: Set the organization policy.
+    notes: Fixture for schema tests.

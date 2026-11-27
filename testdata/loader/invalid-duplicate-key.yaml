@@ -1,0 +1,19 @@
+dsl_version: 1
+benchmark: {id: cis-example, version: "1.0.0"}
+rules:
+  - id: cis-example-1.1
+    ref: "1.1"
+    title: Ensure a repeated key is rejected with its location
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    severity: high
+    scope: project
+    collect:
+      - id: items
+        gcloud: compute instances list --project={{ .project }} --format=json
+    check:
+      assert: size(data.items) == 0
+    remediation: Remove one of the repeated keys.
+    notes: Fixture for loader tests.

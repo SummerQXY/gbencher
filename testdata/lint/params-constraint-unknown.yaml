@@ -1,0 +1,35 @@
+# Lint fixture: the only defect is a params_constraints entry for a param the rule does not define
+# (a misspelled name).
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-params-constraint-unknown-1
+    ref: "1.1"
+    title: Fixture with a constraint for a param that does not exist
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: r.name
+    params:
+      expected_status: RUNNING
+    params_constraints:
+      wanted_status:
+        enum: [RUNNING, STOPPED]
+    check:
+      assert: r.status == params.expected_status
+      message: "Instance {{ .r.name }} is not {{ .params.expected_status }}"
+    remediation: Start the instance.
+    notes: Fixture for the lint tests.

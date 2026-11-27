@@ -1,0 +1,11 @@
+dsl_version: 1
+name: example
+benchmarks: [cis-gcp-foundation@5.0.0, cis-gke@2.0.0]
+levels: [L1, L2]
+include: ["*"]
+exclude: ["cis-gcp-4.7"]
+overrides:
+  cis-gcp-3.6:
+    params: { ports: [22, 2222] }
+  cis-gcp-1.2:
+    params: { allowed_domains: ["example.com"] }

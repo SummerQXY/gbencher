@@ -1,0 +1,27 @@
+# Lint fixture: the only defect is an organization rule that is evaluated once per organization
+# and still reads ctx.project, which has no value in that evaluation.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-evaluate-per-mismatch-1
+    ref: "1.1"
+    title: Fixture that reads the project in an organization-wide evaluation
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: organization
+    evaluate_per: organization
+    services: [accesscontextmanager.googleapis.com]
+    collect:
+      - id: policies
+        gcloud: access-context-manager policies list --organization={{ .organization }} --format=json
+    check:
+      assert: size(data.policies) > 0 && ctx.project != ""
+      message: "Organization {{ .organization }} has no access policy"
+    remediation: Create an access policy.
+    notes: Fixture for the lint tests.

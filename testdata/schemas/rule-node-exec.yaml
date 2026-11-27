@@ -1,0 +1,20 @@
+dsl_version: 1
+benchmark: {id: cis-example, version: "1.0.0"}
+rules:
+  - id: cis-example-1.1
+    ref: "1.1"
+    title: Ensure the kubelet configuration file permissions are restrictive
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    collect:
+      - id: kubelet_mode
+        node_exec:
+          node: "{{ .node }}"
+          command: stat -c %a /etc/kubernetes/kubelet/kubelet-config.yaml
+    check:
+      assert: data.kubelet_mode == "644"
+    remediation: Change the file mode.
+    notes: Fixture for schema tests.

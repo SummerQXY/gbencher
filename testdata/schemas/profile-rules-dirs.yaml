@@ -1,0 +1,4 @@
+dsl_version: 1
+name: example
+rules_dirs:
+  - ./rules-custom

@@ -1,0 +1,86 @@
+# A small, valid rule file that sets every field the loader decodes. The identifiers are
+# placeholders; the two rules differ in scope so that both evaluate_per and the three collect
+# kinds (gcloud, kubectl, api) appear.
+dsl_version: 1
+benchmark:
+  id: cis-example
+  version: "1.0.0"
+  section: "1"
+  title: Example Rules
+rules:
+  - id: cis-example-1.1
+    ref: "1.1"
+    title: Ensure example firewall rules are restricted
+    profile: L1
+    cis_assessment: automated
+    mode: contextual
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    requires: [kubectl]
+    collect:
+      - id: firewalls
+        gcloud: compute firewall-rules list --project={{ .project }} --format=json
+        parse: json
+        on_error: empty
+        cross_project: true
+      - id: details
+        foreach: data.firewalls
+        as: fw
+        attach: details
+        gcloud: compute firewall-rules describe {{ .fw.name }} --project={{ .project }} --format=json
+      - id: nodes
+        kubectl: get nodes -o json
+        requires: [kubectl]
+    resource:
+      from: data.firewalls
+      filter: r.direction == "INGRESS"
+      kind: compute.googleapis.com/Firewall
+      name: r.name
+      key: r.name
+      empty: pass
+    params:
+      freshness_days: 30
+      namespace: default
+      ratio: 0.5
+      enabled: true
+      ports: [22, 2222]
+      severity_rank: {warning: 7, error: 8}
+    params_constraints:
+      freshness_days: {minimum: 1, maximum: 365}
+      namespace: {pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", max_length: 63}
+      level: {enum: [strict, relaxed]}
+    check:
+      assert: "!r.?disabled.orValue(false)"
+      review_when: params.enabled
+      message: "Firewall rule {{ .r.name }} is not restricted"
+      review_message: "Confirm firewall rule {{ .r.name }}"
+    evidence: [r.name, r.network]
+    remediation: Delete or restrict the firewall rule.
+    references:
+      - https://example.com/docs/firewalls
+    notes: Fixture for loader tests.
+    tags: [network, example]
+  - id: cis-example-1.2
+    ref: "1.2"
+    title: Ensure the organization settings are configured
+    profile: L2
+    cis_assessment: manual
+    mode: deterministic
+    severity: low
+    scope: organization
+    evaluate_per: project
+    requires: [workspace-admin]
+    collect:
+      - id: settings
+        api:
+          method: POST
+          url: https://example.googleapis.com/v1/organizations/{{ .organization }}/settings:search
+          body: {pageSize: 50, query: "state=ACTIVE"}
+          paginate: true
+          list_field: settings
+          scopes: ["https://www.googleapis.com/auth/example.readonly"]
+    check:
+      assert: size(data.settings) > 0
+    remediation: Configure the organization settings.
+    notes: Aggregate rule without a resource section.

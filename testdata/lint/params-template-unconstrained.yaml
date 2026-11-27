@@ -1,0 +1,32 @@
+# Lint fixture: the only defect is a param that goes into a command and has no params_constraints
+# entry. A value that is written into a command line must be limited to what the rule expects.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-params-template-unconstrained-1
+    ref: "1.1"
+    title: Fixture with a param in a command that has no constraint
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: instances
+        gcloud: compute instances list --project={{ .project }} --filter=status={{ .params.status }} --format=json
+    resource:
+      from: data.instances
+      kind: compute.googleapis.com/Instance
+      name: r.name
+    params:
+      status: RUNNING
+    check:
+      assert: r.status == params.status
+      message: "Instance {{ .r.name }} is not {{ .params.status }}"
+    remediation: Start the instance.
+    notes: Fixture for the lint tests.

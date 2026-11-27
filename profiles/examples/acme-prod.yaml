@@ -1,0 +1,33 @@
+# Example organization profile. Copy, rename, and adjust; nothing here is required.
+dsl_version: 1
+name: example-org
+benchmarks:
+  - cis-gcp-foundation@5.0.0
+  - cis-gke@2.0.0
+levels: [L1, L2]
+include: ["*"]
+exclude:
+  - cis-gcp-4.7          # CSEK is not an organization requirement; CMEK is enforced elsewhere
+  - cis-gke-3.1.*        # node file checks are covered by the managed COS image policy
+
+overrides:
+  cis-gcp-3.6:
+    params:
+      ports: [22, 2222]
+  cis-gcp-1.2:
+    params:
+      allowed_domains: ["example.com", "example.org"]
+  cis-gke-5.2.1:
+    params:
+      approved_node_roles:
+        - roles/container.defaultNodeServiceAccount
+        - roles/artifactregistry.reader
+        - roles/logging.logWriter
+        - roles/monitoring.metricWriter
+        - roles/monitoring.viewer
+        - roles/stackdriver.resourceMetadata.writer
+        - roles/autoscaling.metricsWriter
+        - roles/secretmanager.secretAccessor
+  cis-gcp-4.12:
+    params:
+      max_available_updates: 0

@@ -1,0 +1,22 @@
+{
+  "target": {
+    "type": "project",
+    "project_id": "example-prod"
+  },
+  "data": {},
+  "expect": [
+    {
+      "rule_id": "cis-gcp-1.1.4",
+      "resource_key": "projects/example-prod",
+      "status": "NOT_APPLICABLE"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "effective_policies": "handwritten"
+    }
+  },
+  "disabled_services": [
+    "orgpolicy.googleapis.com"
+  ]
+}

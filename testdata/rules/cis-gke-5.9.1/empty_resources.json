@@ -1,0 +1,27 @@
+{
+  "target": {
+    "type": "cluster",
+    "project_id": "example-project",
+    "cluster_name": "example-cluster",
+    "cluster_location": "us-central1"
+  },
+  "data": {
+    "storage_classes": {
+      "apiVersion": "v1",
+      "kind": "StorageClassList",
+      "items": []
+    }
+  },
+  "expect": [
+    {
+      "rule_id": "cis-gke-5.9.1",
+      "resource_key": "projects/example-project/locations/us-central1/clusters/example-cluster",
+      "status": "NOT_APPLICABLE"
+    }
+  ],
+  "meta": {
+    "provenance": {
+      "storage_classes": "schema"
+    }
+  }
+}

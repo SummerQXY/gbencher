@@ -1,0 +1,82 @@
+# The only clean lint fixture: it is valid against the rule schema and produces no finding. It has a
+# project rule with a foreach step that attaches its result, an aggregate rule (no resource block)
+# and a cluster rule. Every identifier in it is a placeholder.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-clean-1
+    ref: "1.1"
+    title: Service accounts have no user-managed keys
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: project
+    services: [iam.googleapis.com]
+    collect:
+      - id: service_accounts
+        gcloud: iam service-accounts list --project={{ .project }} --format=json
+      - id: user_keys
+        foreach: data.service_accounts
+        as: sa
+        attach: user_keys
+        gcloud: iam service-accounts keys list --iam-account={{ .sa.email }} --managed-by=user --format=json
+    resource:
+      from: data.service_accounts
+      kind: iam.googleapis.com/ServiceAccount
+      name: r.email
+    params:
+      max_keys: 0
+    check:
+      assert: size(r.?user_keys.orValue([])) <= params.max_keys
+      message: "Service account {{ .r.email }} has more than {{ .params.max_keys }} user-managed keys"
+    evidence: ["r.?user_keys.orValue([]).map(k, k.name)", ctx.project]
+    remediation: Delete the user-managed keys of the service account.
+    notes: Fixture for the lint tests.
+
+  - id: cis-lint-clean-2
+    ref: "1.2"
+    title: The project has no network with the default name
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [compute.googleapis.com]
+    collect:
+      - id: networks
+        gcloud: compute networks list --project={{ .project }} --format=json
+    params:
+      default_name: default
+    check:
+      # r is the macro variable here, not the resource of the rule: an aggregate rule has none.
+      assert: '!data.networks.exists(r, r.name == params.default_name)'
+      message: "Project {{ .project }} has a network named {{ .params.default_name }}"
+    evidence: ["data.networks.map(n, n.name)", 'size(data["networks"])']
+    remediation: Delete the network or replace it with a custom one.
+    notes: Fixture for the lint tests.
+
+  - id: cis-lint-clean-3
+    ref: "1.3"
+    title: Node pools do not use the default service account
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      filter: '!ctx.cluster.?autopilot.?enabled.orValue(false)'
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    check:
+      assert: r.config.?serviceAccount.orValue("default") != "default"
+      message: "Node pool {{ .r.name }} of cluster {{ .cluster.name }} uses the default service account"
+    evidence: [data.cluster.name, r.config.serviceAccount]
+    remediation: Create a node pool with a dedicated service account.
+    notes: Fixture for the lint tests.

@@ -1,0 +1,261 @@
+dsl_version: 1
+benchmark:
+  id: cis-gcp-foundation
+  version: "5.0.0"
+  section: "7"
+  title: BigQuery
+# BigQuery dataset/table metadata and DLP discovery config have no equivalent gcloud sub-command; bq is a separate CLI, so the Google REST API is used.
+rules:
+  - id: cis-gcp-7.1
+    ref: "7.1"
+    title: Ensure That BigQuery Datasets Are Not Anonymously or Publicly Accessible
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: critical
+    scope: project
+    services: [bigquery.googleapis.com]
+    collect:
+      - id: datasets
+        api:
+          method: GET
+          url: https://bigquery.googleapis.com/bigquery/v2/projects/{{ .project }}/datasets?all=true
+          paginate: true
+          list_field: datasets
+      - id: dataset_details
+        foreach: data.datasets
+        as: ds
+        api:
+          method: GET
+          url: https://bigquery.googleapis.com/bigquery/v2/projects/{{ .project }}/datasets/{{ .ds.datasetReference.datasetId }}
+    resource:
+      from: data.dataset_details
+      kind: bigquery.googleapis.com/Dataset
+      name: r.datasetReference.datasetId
+    params:
+      public_members: [allUsers, allAuthenticatedUsers]
+    check:
+      assert: |
+        !r.?access.orValue([]).exists(a,
+          a.?specialGroup.orValue("") in params.public_members
+          || a.?iamMember.orValue("") in params.public_members)
+      message: "Dataset {{ .r.datasetReference.datasetId }} grants access to allUsers or allAuthenticatedUsers"
+    evidence:
+      - 'r.?access.orValue([]).filter(a, a.?specialGroup.orValue("") in params.public_members || a.?iamMember.orValue("") in params.public_members)'
+    remediation: |
+      bq show --format=prettyjson <PROJECT_ID>:<DATASET> > <FILE>
+      remove the access entries for allUsers / allAuthenticatedUsers from <FILE>, then
+      bq update --source <FILE> <PROJECT_ID>:<DATASET>
+    references:
+      - https://cloud.google.com/bigquery/docs/dataset-access-controls
+    notes: |
+      bq is a separate tool and gcloud has no stable BigQuery dataset command, so datasets are read
+      through the BigQuery REST API: datasets.list with all=true (hidden datasets included, stricter
+      than the CIS bq ls audit) and datasets.get for the access list. Fails when any access entry has
+      specialGroup or iamMember equal to allUsers or allAuthenticatedUsers; BigQuery normally reports
+      allAuthenticatedUsers as specialGroup and allUsers as iamMember, and both fields are checked for
+      both values. Domain, group, user, projectOwners/Writers/Readers and authorized view, routine or
+      dataset entries are not public. Table-level IAM policies are not inspected. A project without
+      datasets is NOT_APPLICABLE.
+
+  - id: cis-gcp-7.2
+    ref: "7.2"
+    title: Ensure That All BigQuery Tables Are Encrypted With Customer-Managed Encryption Key (CMEK)
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [bigquery.googleapis.com]
+    collect:
+      - id: datasets
+        api:
+          method: GET
+          url: https://bigquery.googleapis.com/bigquery/v2/projects/{{ .project }}/datasets?all=true
+          paginate: true
+          list_field: datasets
+      - id: tables
+        foreach: 'data.datasets.filter(d, !d.datasetReference.datasetId.startsWith("_"))'
+        as: ds
+        api:
+          method: GET
+          url: https://bigquery.googleapis.com/bigquery/v2/projects/{{ .project }}/datasets/{{ .ds.datasetReference.datasetId }}/tables
+          paginate: true
+          list_field: tables
+      - id: table_details
+        foreach: data.tables.flatten()
+        as: t
+        api:
+          method: GET
+          url: https://bigquery.googleapis.com/bigquery/v2/projects/{{ .project }}/datasets/{{ .t.tableReference.datasetId }}/tables/{{ .t.tableReference.tableId }}
+    resource:
+      from: data.table_details
+      filter: 'r.?type.orValue("TABLE") == "TABLE"'
+      kind: bigquery.googleapis.com/Table
+      name: 'r.tableReference.datasetId + "." + r.tableReference.tableId'
+    check:
+      assert: 'r.?encryptionConfiguration.?kmsKeyName.orValue("") != ""'
+      message: "Table {{ .r.tableReference.datasetId }}.{{ .r.tableReference.tableId }} is encrypted with a Google-managed key instead of a customer-managed key"
+    evidence: [r.encryptionConfiguration, r.type]
+    remediation: |
+      bq cp --destination_kms_key <KMS_KEY_NAME> <DATASET>.<TABLE> <DATASET>.<TABLE>
+      (identical source and destination re-encrypts the table in place; add -f to overwrite without a prompt)
+    references:
+      - https://cloud.google.com/bigquery/docs/customer-managed-encryption
+    notes: |
+      tables.list does not return encryptionConfiguration, so every table is read with tables.get.
+      Only type TABLE is evaluated: views and external tables have no BigQuery-managed storage to
+      encrypt, and snapshots and materialized views are outside this check. A missing kmsKeyName means
+      Google-managed encryption (the CIS default) and fails. Hidden datasets (IDs starting with "_",
+      including anonymous query-result datasets) are not enumerated, matching the CIS bq ls audit.
+      Warning: enumeration costs one REST call per dataset plus one per table, so projects with
+      thousands of tables make thousands of calls and scan slowly; the calls are shared with 7.4
+      through collection dedup. Exclude the rule with --exclude if that cost is unacceptable.
+
+  - id: cis-gcp-7.3
+    ref: "7.3"
+    title: Ensure That a Default Customer-Managed Encryption Key (CMEK) Is Specified for All BigQuery Data Sets
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: project
+    services: [bigquery.googleapis.com]
+    collect:
+      - id: datasets
+        api:
+          method: GET
+          url: https://bigquery.googleapis.com/bigquery/v2/projects/{{ .project }}/datasets?all=true
+          paginate: true
+          list_field: datasets
+      - id: dataset_details
+        foreach: data.datasets
+        as: ds
+        api:
+          method: GET
+          url: https://bigquery.googleapis.com/bigquery/v2/projects/{{ .project }}/datasets/{{ .ds.datasetReference.datasetId }}
+    resource:
+      from: data.dataset_details
+      filter: |
+        !r.datasetReference.datasetId.startsWith("_")
+        && !has(r.linkedDatasetSource)
+        && !has(r.externalDatasetReference)
+      kind: bigquery.googleapis.com/Dataset
+      name: r.datasetReference.datasetId
+    check:
+      assert: 'r.?defaultEncryptionConfiguration.?kmsKeyName.orValue("") != ""'
+      message: "Dataset {{ .r.datasetReference.datasetId }} has no default customer-managed encryption key"
+    evidence: [r.defaultEncryptionConfiguration, r.location]
+    remediation: |
+      bq update --default_kms_key=<KMS_KEY_NAME> <PROJECT_ID>:<DATASET>
+      (equivalent to setting defaultEncryptionConfiguration.kmsKeyName through datasets.patch)
+    references:
+      - https://cloud.google.com/bigquery/docs/customer-managed-encryption
+    notes: |
+      datasets.list omits defaultEncryptionConfiguration, so each dataset is read with datasets.get.
+      A missing kmsKeyName means Google-managed encryption (the CIS default) and fails. Hidden datasets
+      (IDs starting with "_", including anonymous query-result datasets) are skipped as in the CIS
+      bq ls audit; linked (Analytics Hub) and external datasets are skipped because they have no
+      BigQuery-managed storage of their own. A project-level default key set through BigQuery
+      configuration settings is not read: the dataset itself must carry a default key, as in the CIS
+      audit. A dataset default key only applies to tables created afterwards; existing tables are
+      covered by 7.2.
+
+  - id: cis-gcp-7.4
+    ref: "7.4"
+    title: Ensure all data in BigQuery has been classified
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: low
+    scope: project
+    services: [bigquery.googleapis.com]
+    collect:
+      - id: datasets
+        api:
+          method: GET
+          url: https://bigquery.googleapis.com/bigquery/v2/projects/{{ .project }}/datasets?all=true
+          paginate: true
+          list_field: datasets
+      - id: tables
+        foreach: 'data.datasets.filter(d, !d.datasetReference.datasetId.startsWith("_"))'
+        as: ds
+        api:
+          method: GET
+          url: https://bigquery.googleapis.com/bigquery/v2/projects/{{ .project }}/datasets/{{ .ds.datasetReference.datasetId }}/tables
+          paginate: true
+          list_field: tables
+      - id: table_details
+        foreach: data.tables.flatten()
+        as: t
+        api:
+          method: GET
+          url: https://bigquery.googleapis.com/bigquery/v2/projects/{{ .project }}/datasets/{{ .t.tableReference.datasetId }}/tables/{{ .t.tableReference.tableId }}
+      - id: discovery_configs
+        api:
+          method: GET
+          url: https://dlp.googleapis.com/v2/projects/{{ .project }}/locations/global/discoveryConfigs
+          paginate: true
+          list_field: discoveryConfigs
+        on_error: empty
+    resource:
+      from: data.datasets
+      filter: '!r.datasetReference.datasetId.startsWith("_")'
+      kind: bigquery.googleapis.com/Dataset
+      name: r.datasetReference.datasetId
+    params:
+      classification_label_key: data-classification
+      discovery_configured_elsewhere: false
+    check:
+      assert: |
+        r.?labels[?params.classification_label_key].orValue("") != ""
+        || data.table_details.exists(t,
+             t.tableReference.datasetId == r.datasetReference.datasetId
+             && t.?schema.?fields.orValue([]).exists(f,
+                  size(f.?policyTags.?names.orValue([])) > 0
+                  || f.?fields.orValue([]).exists(sf, size(sf.?policyTags.?names.orValue([])) > 0)))
+        || params.discovery_configured_elsewhere
+        || data.discovery_configs.exists(c,
+             c.?status.orValue("") == "RUNNING"
+             && c.?targets.orValue([]).exists(tg,
+                  has(tg.bigQueryTarget) && !has(tg.bigQueryTarget.disabled)))
+      review_when: |
+        !(
+          r.?labels[?params.classification_label_key].orValue("") != ""
+          || data.table_details.exists(t,
+               t.tableReference.datasetId == r.datasetReference.datasetId
+               && t.?schema.?fields.orValue([]).exists(f,
+                    size(f.?policyTags.?names.orValue([])) > 0
+                    || f.?fields.orValue([]).exists(sf, size(sf.?policyTags.?names.orValue([])) > 0)))
+        )
+      message: "Dataset {{ .r.datasetReference.datasetId }} has no '{{ .params.classification_label_key }}' label or policy-tagged column, and the project has no active Sensitive Data Protection discovery config for BigQuery"
+      review_message: "Dataset {{ .r.datasetReference.datasetId }} has no '{{ .params.classification_label_key }}' label or policy-tagged column; BigQuery discovery is active or declared via discovery_configured_elsewhere: confirm the discovery config covers this dataset and its data profiles are reviewed"
+    evidence:
+      - r.labels
+      - 'data.discovery_configs.map(c, c.name + " " + c.?status.orValue(""))'
+      - 'data.table_details.filter(t, t.tableReference.datasetId == r.datasetReference.datasetId && t.?schema.?fields.orValue([]).exists(f, size(f.?policyTags.?names.orValue([])) > 0 || f.?fields.orValue([]).exists(sf, size(sf.?policyTags.?names.orValue([])) > 0))).map(t, t.tableReference.tableId)'
+    remediation: |
+      Create a Sensitive Data Protection discovery scan configuration for BigQuery at project level
+      (https://cloud.google.com/dlp/docs/profile-project) or organization/folder level, then record the
+      classification on each dataset and protect sensitive columns, e.g.:
+      bq update --set_label data-classification:<LEVEL> <PROJECT_ID>:<DATASET>
+      and attach BigQuery policy tags to sensitive columns.
+    references:
+      - https://cloud.google.com/dlp/docs/data-profiles
+      - https://cloud.google.com/dlp/docs/analyze-data-profiles
+      - https://cloud.google.com/dlp/docs/data-profiles-remediation
+    notes: |
+      CIS marks this Manual and its audit only checks that a Sensitive Data Protection discovery scan
+      configuration exists. This rule evaluates every non-hidden dataset:
+      PASS when the dataset carries an explicit classification marker, i.e. a non-empty label named
+      params.classification_label_key or at least one table column (top level or first nested level)
+      with a policy tag. REVIEW when it has no marker but the project has a RUNNING discovery config
+      with an enabled BigQuery target (or discovery_configured_elsewhere is true): discovery profiles
+      the data without marking the dataset and its filters may exclude it, so confirm coverage and that
+      the profiles are acted upon. FAIL when there is neither a marker nor active discovery.
+      Tune classification_label_key to your labeling convention. Set discovery_configured_elsewhere to
+      true when BigQuery discovery runs from an organization or folder config, or from a config stored
+      outside locations/global; only projects/<project>/locations/global/discoveryConfigs is read.
+      dlp.googleapis.com is deliberately not in services: when the API is disabled, on_error: empty
+      yields no configs. Data profiles and table labels are not read. Table enumeration is shared with
+      7.2 and can be large.

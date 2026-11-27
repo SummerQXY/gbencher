@@ -1,0 +1,224 @@
+{
+  "resources": {
+    "datasets.get": {
+      "httpMethod": "GET",
+      "parameters": {
+        "accessPolicyVersion": {
+          "location": "query",
+          "type": "integer"
+        },
+        "datasetId": {
+          "location": "path",
+          "type": "string"
+        },
+        "datasetView": {
+          "enum": [
+            "DATASET_VIEW_UNSPECIFIED",
+            "METADATA",
+            "ACL",
+            "FULL",
+            "BASIC",
+            "BASIC_REPLICA_METADATA_VIEW"
+          ],
+          "location": "query",
+          "type": "string"
+        },
+        "projectId": {
+          "location": "path",
+          "type": "string"
+        }
+      },
+      "response": {
+        "$ref": "Dataset"
+      }
+    },
+    "datasets.list": {
+      "httpMethod": "GET",
+      "parameters": {
+        "all": {
+          "location": "query",
+          "type": "boolean"
+        },
+        "filter": {
+          "location": "query",
+          "type": "string"
+        },
+        "maxResults": {
+          "location": "query",
+          "type": "integer"
+        },
+        "pageToken": {
+          "location": "query",
+          "type": "string"
+        },
+        "projectId": {
+          "location": "path",
+          "type": "string"
+        }
+      },
+      "response": {
+        "$ref": "DatasetList"
+      }
+    },
+    "tables.get": {
+      "httpMethod": "GET",
+      "parameters": {
+        "datasetId": {
+          "location": "path",
+          "type": "string"
+        },
+        "projectId": {
+          "location": "path",
+          "type": "string"
+        },
+        "selectedFields": {
+          "location": "query",
+          "type": "string"
+        },
+        "tableId": {
+          "location": "path",
+          "type": "string"
+        },
+        "view": {
+          "enum": [
+            "TABLE_METADATA_VIEW_UNSPECIFIED",
+            "BASIC",
+            "STORAGE_STATS",
+            "FULL"
+          ],
+          "location": "query",
+          "type": "string"
+        }
+      },
+      "response": {
+        "$ref": "Table"
+      }
+    },
+    "tables.list": {
+      "httpMethod": "GET",
+      "parameters": {
+        "datasetId": {
+          "location": "path",
+          "type": "string"
+        },
+        "maxResults": {
+          "location": "query",
+          "type": "integer"
+        },
+        "pageToken": {
+          "location": "query",
+          "type": "string"
+        },
+        "projectId": {
+          "location": "path",
+          "type": "string"
+        }
+      },
+      "response": {
+        "$ref": "TableList"
+      }
+    }
+  },
+  "schemas": {
+    "Dataset": {
+      "access": {
+        "$array": "Dataset_AccessItem"
+      },
+      "datasetReference": {
+        "$ref": "DatasetReference"
+      },
+      "defaultEncryptionConfiguration": {
+        "$ref": "EncryptionConfiguration"
+      },
+      "externalDatasetReference": {
+        "$ref": "ExternalDatasetReference"
+      },
+      "labels": {
+        "$map": true
+      },
+      "linkedDatasetSource": {
+        "$ref": "LinkedDatasetSource"
+      },
+      "location": true
+    },
+    "DatasetList": {
+      "datasets": {
+        "$array": "DatasetList_DatasetsItem"
+      },
+      "nextPageToken": true
+    },
+    "DatasetList_DatasetsItem": {
+      "datasetReference": {
+        "$ref": "DatasetReference"
+      }
+    },
+    "DatasetReference": {
+      "datasetId": true,
+      "projectId": true
+    },
+    "Dataset_AccessItem": {
+      "iamMember": true,
+      "specialGroup": true
+    },
+    "EncryptionConfiguration": {
+      "kmsKeyName": true
+    },
+    "ExternalDatasetReference": {
+      "connection": true
+    },
+    "LinkedDatasetSource": {
+      "sourceDataset": {
+        "$ref": "DatasetReference"
+      }
+    },
+    "Table": {
+      "encryptionConfiguration": {
+        "$ref": "EncryptionConfiguration"
+      },
+      "schema": {
+        "$ref": "TableSchema"
+      },
+      "tableReference": {
+        "$ref": "TableReference"
+      },
+      "type": true
+    },
+    "TableFieldSchema": {
+      "fields": {
+        "$array": "TableFieldSchema"
+      },
+      "policyTags": {
+        "$ref": "TableFieldSchema_PolicyTags"
+      }
+    },
+    "TableFieldSchema_PolicyTags": {
+      "names": {
+        "$array": true
+      }
+    },
+    "TableList": {
+      "nextPageToken": true,
+      "tables": {
+        "$array": "TableList_TablesItem"
+      }
+    },
+    "TableList_TablesItem": {
+      "tableReference": {
+        "$ref": "TableReference"
+      },
+      "type": true
+    },
+    "TableReference": {
+      "datasetId": true,
+      "projectId": true,
+      "tableId": true
+    },
+    "TableSchema": {
+      "fields": {
+        "$array": "TableFieldSchema"
+      }
+    }
+  },
+  "source": "https://bigquery.googleapis.com/$discovery/rest?version=v2",
+  "version": "v2"
+}

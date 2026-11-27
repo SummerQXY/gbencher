@@ -1,0 +1,27 @@
+# Lint fixture: the only defect is an organization rule that does not say how often it is
+# evaluated. The rule schema requires evaluate_per there, so the file also has one schema
+# violation, and the lint reports the missing field once more with the rule id.
+dsl_version: 1
+benchmark:
+  id: cis-lint-fixtures
+  version: "1.0.0"
+  section: "1"
+  title: Lint fixtures
+rules:
+  - id: cis-lint-evaluate-per-1
+    ref: "1.1"
+    title: Fixture with an organization rule that has no evaluate_per
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: organization
+    services: [accesscontextmanager.googleapis.com]
+    collect:
+      - id: policies
+        gcloud: access-context-manager policies list --organization={{ .organization }} --format=json
+    check:
+      assert: size(data.policies) > 0
+      message: "Organization {{ .organization }} has no access policy"
+    remediation: Create an access policy.
+    notes: Fixture for the lint tests.

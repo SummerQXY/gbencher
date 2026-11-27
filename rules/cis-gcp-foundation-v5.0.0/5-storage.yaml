@@ -1,0 +1,94 @@
+dsl_version: 1
+benchmark:
+  id: cis-gcp-foundation
+  version: "5.0.0"
+  section: "5"
+  title: Storage
+rules:
+  - id: cis-gcp-5.1
+    ref: "5.1"
+    title: Ensure That Cloud Storage Bucket Is Not Anonymously or Publicly Accessible
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: critical
+    scope: project
+    services: [storage.googleapis.com]
+    collect:
+      - id: buckets
+        gcloud: storage buckets list --project={{ .project }} --format=json
+      - id: bucket_iam
+        foreach: data.buckets
+        as: b
+        attach: iam_policy
+        gcloud: storage buckets get-iam-policy {{ .b.storage_url }} --format=json
+    resource:
+      from: data.buckets
+      kind: storage.googleapis.com/Bucket
+      name: r.name
+    params:
+      public_members: [allUsers, allAuthenticatedUsers]
+    check:
+      assert: |
+        r.?public_access_prevention.orValue("") == "enforced"
+        || !r.?iam_policy.?bindings.orValue([]).exists(b,
+             b.?members.orValue([]).exists(m, m in params.public_members))
+      message: "Bucket {{ .r.name }} grants IAM access to allUsers or allAuthenticatedUsers and public access prevention is not enforced"
+    evidence:
+      - r.public_access_prevention
+      - 'r.?iam_policy.?bindings.orValue([]).filter(b, b.?members.orValue([]).exists(m, m in params.public_members))'
+    remediation: |
+      gsutil iam ch -d allUsers gs://<BUCKET_NAME>
+      gsutil iam ch -d allAuthenticatedUsers gs://<BUCKET_NAME>
+      (gcloud equivalent: gcloud storage buckets remove-iam-policy-binding gs://<BUCKET_NAME> --member=allUsers --role=<ROLE>)
+      To block public access on the bucket: gcloud storage buckets update gs://<BUCKET_NAME> --public-access-prevention
+    references:
+      - https://cloud.google.com/storage/docs/access-control/iam-reference
+      - https://cloud.google.com/storage/docs/access-control/making-data-public
+      - https://cloud.google.com/storage/docs/gsutil/commands/iam
+    notes: |
+      Mirrors the CIS audit: each bucket's IAM policy is read with gcloud storage buckets get-iam-policy
+      and any binding (conditional or not) whose members include allUsers or allAuthenticatedUsers fails.
+      Bucket ACL grants are mirrored into the bucket IAM policy as legacy roles, so they are covered.
+      A bucket whose public_access_prevention is "enforced" passes regardless of its bindings, because
+      enforcement blocks allUsers/allAuthenticatedUsers access. Prevention enforced only through the
+      storage.publicAccessPrevention organization policy shows as "inherited" on the bucket, so a stale
+      public binding on such a bucket still fails (remove it or enforce prevention on the bucket).
+      Object ACLs on fine-grained buckets are not inspected; 5.2 requires uniform bucket-level access,
+      which disables them. A project without buckets is NOT_APPLICABLE. gcloud storage emits snake_case keys
+      (storage_url, public_access_prevention) unless --raw is used; confirm against the installed gcloud.
+
+  - id: cis-gcp-5.2
+    ref: "5.2"
+    title: Ensure That Cloud Storage Buckets Have Uniform Bucket-Level Access Enabled
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [storage.googleapis.com]
+    collect:
+      - id: buckets
+        gcloud: storage buckets list --project={{ .project }} --format=json
+    resource:
+      from: data.buckets
+      kind: storage.googleapis.com/Bucket
+      name: r.name
+    check:
+      assert: r.?uniform_bucket_level_access.orValue(false) == true
+      message: "Bucket {{ .r.name }} does not have uniform bucket-level access enabled"
+    evidence: [r.uniform_bucket_level_access, r.public_access_prevention]
+    remediation: |
+      gsutil uniformbucketlevelaccess set on gs://<BUCKET_NAME>/
+      (gcloud equivalent: gcloud storage buckets update gs://<BUCKET_NAME> --uniform-bucket-level-access)
+    references:
+      - https://cloud.google.com/storage/docs/uniform-bucket-level-access
+      - https://cloud.google.com/storage/docs/using-uniform-bucket-level-access
+      - https://cloud.google.com/storage/docs/setting-org-policies#uniform-bucket
+    notes: |
+      Reads uniform_bucket_level_access from gcloud storage buckets list, which emits snake_case keys
+      (the raw REST field is iamConfiguration.uniformBucketLevelAccess.enabled). The CIS default is
+      disabled, so a missing field fails; the locked state is not required. Severity is medium rather
+      than low because fine-grained ACLs allow object-level public exposure that the bucket IAM review
+      in 5.1 cannot see. Buckets that must keep ACLs for a legacy integration should be exempted in the
+      profile with a justification.

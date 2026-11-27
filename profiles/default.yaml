@@ -1,0 +1,10 @@
+# Default profile: both benchmarks, both levels, built-in rules only, no overrides.
+dsl_version: 1
+name: default
+benchmarks:
+  - cis-gcp-foundation@5.0.0
+  - cis-gke@2.0.0
+levels: [L1, L2]
+include: ["*"]
+exclude: []
+overrides: {}

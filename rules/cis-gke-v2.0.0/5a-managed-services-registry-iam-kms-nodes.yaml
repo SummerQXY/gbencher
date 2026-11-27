@@ -1,0 +1,568 @@
+dsl_version: 1
+benchmark:
+  id: cis-gke
+  version: "2.0.0"
+  section: "5"
+  title: Managed services (5.1 registry, 5.2 IAM, 5.3 KMS, 5.4 metadata, 5.5 node configuration)
+# GKE rule design convention: scope: cluster means the engine enumerates clusters and injects the current cluster JSON into ctx.cluster and implicit data.cluster; rules must not repeat a cluster-level collect.
+rules:
+  - id: cis-gke-5.1.1
+    ref: "5.1.1"
+    title: Enable Artifact Analysis scanning for Artifact Registry container images
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: project
+    services: [artifactregistry.googleapis.com]
+    collect:
+      - id: services
+        gcloud: services list --enabled --project={{ .project }} --format=json
+      - id: repositories
+        gcloud: artifacts repositories list --project={{ .project }} --format=json
+    resource:
+      from: data.repositories
+      filter: |
+        r.?format.orValue("") == "DOCKER"
+        && r.?mode.orValue("STANDARD_REPOSITORY") != "VIRTUAL_REPOSITORY"
+      kind: artifactregistry.googleapis.com/Repository
+      name: 'r.name.replace("projects/" + ctx.project + "/locations/", "").replace("/repositories/", "/")'
+    check:
+      assert: |
+        data.services.exists(s, s.?config.?name.orValue("") == "containerscanning.googleapis.com")
+        && r.?vulnerabilityScanningConfig.?enablementConfig.orValue("INHERITED") != "DISABLED"
+      message: "Docker repository {{ .r.name }} is not scanned by Artifact Analysis: containerscanning.googleapis.com is not enabled in the project or scanning is disabled on the repository"
+    evidence:
+      - 'data.services.exists(s, s.?config.?name.orValue("") == "containerscanning.googleapis.com")'
+      - r.vulnerabilityScanningConfig
+      - r.mode
+    remediation: |
+      gcloud services enable containerscanning.googleapis.com --project=<PROJECT_ID>
+      gcloud artifacts repositories update <REPOSITORY> --project=<PROJECT_ID> --location=<LOCATION> --allow-vulnerability-scanning
+    references:
+      - https://docs.cloud.google.com/artifact-analysis/docs/container-scanning-overview
+      - https://docs.cloud.google.com/artifact-analysis/docs/enable-automatic-scanning
+      - https://docs.cloud.google.com/artifact-registry/docs/analysis
+    notes: |
+      Replaces reading the enabled-services list and the repository scanning table by hand. Population:
+      Artifact Registry repositories, filtered to DOCKER format except VIRTUAL_REPOSITORY (virtual
+      repositories store no images). A repository fails when containerscanning.googleapis.com is not
+      enabled in the project or vulnerabilityScanningConfig.enablementConfig is DISABLED; an absent or
+      INHERITED setting follows the project API. The scanning API is deliberately not in services because
+      a disabled API is the finding; enablementState and enablementStateReason are kept as evidence.
+      Resource names are <location>/<repository>. Limitations: which repositories feed GKE workloads is not
+      observable, so every Docker repository is checked; projects without Docker repositories are
+      NOT_APPLICABLE (images hosted in another project are judged when that project is scanned); legacy
+      Container Registry (gcr.io) is not covered. The list step omits --location so gcloud enumerates all
+      locations; a locally set artifacts/location gcloud property would narrow it to that location.
+
+  - id: cis-gke-5.1.2
+    ref: "5.1.2"
+    title: Grant least privilege IAM access to Artifact Registry repositories
+    profile: L2
+    cis_assessment: manual
+    mode: contextual
+    severity: critical
+    scope: project
+    services: [artifactregistry.googleapis.com]
+    collect:
+      - id: repositories
+        gcloud: artifacts repositories list --project={{ .project }} --format=json
+      - id: repo_iam_policies
+        foreach: data.repositories
+        as: repo
+        attach: iam_policy
+        gcloud: artifacts repositories get-iam-policy {{ .repo.name }} --project={{ .project }} --format=json
+      - id: project_iam_policy
+        gcloud: projects get-iam-policy {{ .project }} --format=json
+    resource:
+      from: data.repositories
+      filter: r.?format.orValue("") == "DOCKER"
+      kind: artifactregistry.googleapis.com/Repository
+      name: 'r.name.replace("projects/" + ctx.project + "/locations/", "").replace("/repositories/", "/")'
+    params:
+      write_roles:
+        - roles/artifactregistry.writer
+        - roles/artifactregistry.repoAdmin
+        - roles/artifactregistry.admin
+        - roles/artifactregistry.createOnPushWriter
+        - roles/artifactregistry.createOnPushRepoAdmin
+        - roles/owner
+        - roles/editor
+      project_write_roles:
+        - roles/artifactregistry.writer
+        - roles/artifactregistry.repoAdmin
+        - roles/artifactregistry.admin
+        - roles/artifactregistry.createOnPushWriter
+        - roles/artifactregistry.createOnPushRepoAdmin
+      approved_writers: []
+    check:
+      assert: |
+        !r.?iam_policy.?bindings.orValue([]).exists(b,
+          b.?members.orValue([]).exists(m, m in ["allUsers", "allAuthenticatedUsers"]))
+      review_when: |
+        r.?iam_policy.?bindings.orValue([]).exists(b,
+          b.role in params.write_roles
+          && b.?members.orValue([]).exists(m, !(m in params.approved_writers)))
+        || data.project_iam_policy.?bindings.orValue([]).exists(b,
+          b.role in params.project_write_roles
+          && b.?members.orValue([]).exists(m, !(m in params.approved_writers)))
+      message: "Repository {{ .r.name }} grants access to allUsers or allAuthenticatedUsers"
+      review_message: "Repository {{ .r.name }} grants write or admin roles to principals outside approved_writers (write_roles on the repository or project_write_roles on the project); confirm each principal needs that access and add approved ones to approved_writers"
+    evidence:
+      - r.iam_policy.bindings
+      - 'data.project_iam_policy.bindings.filter(b, b.role in params.project_write_roles)'
+    remediation: |
+      gcloud artifacts repositories remove-iam-policy-binding <REPOSITORY> --project=<PROJECT_ID> --location=<LOCATION> --member=<MEMBER> --role=<ROLE>
+      gcloud artifacts repositories add-iam-policy-binding <REPOSITORY> --project=<PROJECT_ID> --location=<LOCATION> --member=<MEMBER> --role=roles/artifactregistry.reader
+    references:
+      - https://docs.cloud.google.com/artifact-registry/docs/access-control
+      - https://docs.cloud.google.com/artifact-registry/docs/integrate-gke
+      - https://docs.cloud.google.com/iam/docs/roles-permissions/artifactregistry
+    notes: |
+      CIS marks this Manual because least privilege depends on who should publish or administer images.
+      Each repository's IAM policy is read with get-iam-policy (full resource name as the positional
+      argument) and attached as r.iam_policy; the project IAM policy covers grants that reach every
+      repository. Population: DOCKER repositories of any mode. FAIL: allUsers or allAuthenticatedUsers
+      bound on the repository (exempt intentionally public repositories in the profile). REVIEW: a role in
+      write_roles on the repository, or in project_write_roles on the project, held by a member outside
+      approved_writers. Tune approved_writers with exact IAM member strings of CI/CD publishers and platform
+      administrators (e.g. group:platform-admins@example.com) to converge to PASS/FAIL. Basic roles are left
+      out of project_write_roles by default because every project has Owners and Google-managed service
+      agents with Editor; add roles/owner and roles/editor there to review them as well. Limitations: IAM
+      conditions are treated as granted; folder and organization grants and read-only access are not
+      evaluated (node service account roles are covered by 5.2.1).
+
+  - id: cis-gke-5.1.3
+    ref: "5.1.3"
+    title: Enforce Binary Authorization for trusted GKE container image deployments
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    collect:
+      - id: binauthz_policy
+        # Shares the project-level Policy export with GKE 4.5.1; determines the admission rule that applies to the cluster.
+        gcloud: container binauthz policy export --project={{ .project }} --format=json
+        on_error: empty
+    params:
+      enforcing_modes:
+        - PROJECT_SINGLETON_POLICY_ENFORCE
+        - POLICY_BINDINGS_AND_PROJECT_SINGLETON_POLICY_ENFORCE
+    check:
+      assert: |
+        (
+          ctx.cluster.?binaryAuthorization.?evaluationMode.orValue("EVALUATION_MODE_UNSPECIFIED") in params.enforcing_modes
+          || (
+            ctx.cluster.?binaryAuthorization.?evaluationMode.orValue("EVALUATION_MODE_UNSPECIFIED") == "EVALUATION_MODE_UNSPECIFIED"
+            && ctx.cluster.?binaryAuthorization.?enabled.orValue(false)
+          )
+        )
+        && (
+          type(data.binauthz_policy) != map
+          || [data.binauthz_policy.?clusterAdmissionRules[?(ctx.cluster.location + "." + ctx.cluster.name)]
+                .orValue(data.binauthz_policy.?defaultAdmissionRule.orValue({}))].all(rule,
+               rule.?evaluationMode.orValue("") != "ALWAYS_ALLOW"
+               && rule.?enforcementMode.orValue("") != "DRYRUN_AUDIT_LOG_ONLY")
+        )
+      message: "Binary Authorization does not block untrusted images on this cluster: the evaluation mode is not in enforcing_modes, or the admission rule that applies to the cluster is ALWAYS_ALLOW or DRYRUN_AUDIT_LOG_ONLY"
+    evidence:
+      - ctx.cluster.binaryAuthorization
+      - data.binauthz_policy.defaultAdmissionRule
+      - 'data.binauthz_policy.clusterAdmissionRules[ctx.cluster.location + "." + ctx.cluster.name]'
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --binauthz-evaluation-mode=PROJECT_SINGLETON_POLICY_ENFORCE
+      then set defaultAdmissionRule (or the cluster's clusterAdmissionRules entry) to REQUIRE_ATTESTATION, or ALWAYS_DENY
+      with admissionWhitelistPatterns, using ENFORCED_BLOCK_AND_AUDIT_LOG, and import it:
+      gcloud container binauthz policy import policy.yaml --project=<PROJECT_ID>
+    references:
+      - https://docs.cloud.google.com/binary-authorization/docs/enable-cluster
+      - https://docs.cloud.google.com/binary-authorization/docs/configure-policy-gke
+      - https://docs.cloud.google.com/binary-authorization/docs/policy-yaml-reference
+    notes: |
+      Mirrors both CIS audit steps. (1) The cluster's binaryAuthorization.evaluationMode must be in
+      enforcing_modes; the deprecated enabled=true also passes when no evaluation mode is set. POLICY_BINDINGS
+      on its own is continuous validation (monitoring only) and is excluded because CIS requires an
+      enforcing mode. (2) The project policy is read with the Binary Authorization REST getPolicy method,
+      which returns the same document as `gcloud container binauthz policy export` (the export verb is not
+      on the read-only allowlist). The admission rule that applies to this cluster, the
+      clusterAdmissionRules entry keyed "<location>.<cluster name>" when present and defaultAdmissionRule
+      otherwise, must not be ALWAYS_ALLOW and must not use DRYRUN_AUDIT_LOG_ONLY. If the policy cannot be
+      read (for example the API is disabled), on_error: empty leaves only check (1); the type() guard keeps
+      that true whether the empty result is {} or []. Permission errors still SKIP.
+      binaryauthorization.googleapis.com is not in services because an unused API means nothing is enforced.
+      Applies to Standard and Autopilot clusters. Limitations: attestor choice, the breadth of
+      admissionWhitelistPatterns, and namespace or service-account scoped rules are not judged.
+
+  - id: cis-gke-5.2.1
+    ref: "5.2.1"
+    title: Use custom least privilege service accounts for GKE node pools
+    profile: L1
+    cis_assessment: automated
+    mode: contextual
+    severity: high
+    scope: cluster
+    services: [container.googleapis.com]
+    collect:
+      - id: iam_policy
+        gcloud: projects get-iam-policy {{ .project }} --format=json
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    params:
+      broad_roles: [roles/owner, roles/editor]
+      approved_node_roles:
+        - roles/container.defaultNodeServiceAccount
+        - roles/artifactregistry.reader
+        - roles/logging.logWriter
+        - roles/monitoring.metricWriter
+        - roles/monitoring.viewer
+        - roles/stackdriver.resourceMetadata.writer
+        - roles/autoscaling.metricsWriter
+    check:
+      assert: |
+        r.config.?serviceAccount.orValue("default") != "default"
+        && !r.config.serviceAccount.endsWith("-compute@developer.gserviceaccount.com")
+        && !data.iam_policy.?bindings.orValue([]).exists(b,
+             b.role in params.broad_roles
+             && ("serviceAccount:" + r.config.serviceAccount) in b.?members.orValue([]))
+      review_when: |
+        data.iam_policy.?bindings.orValue([]).exists(b,
+          !(b.role in params.approved_node_roles)
+          && ("serviceAccount:" + r.config.serviceAccount) in b.?members.orValue([]))
+      message: "Node pool {{ .r.name }} uses the Compute Engine default service account or a service account with a broad role"
+      review_message: "Node pool {{ .r.name }} uses {{ .r.config.serviceAccount }}, which holds roles outside approved_node_roles; confirm least privilege"
+    evidence: [r.config.serviceAccount, r.config.oauthScopes]
+    remediation: |
+      gcloud container node-pools create <POOL> --cluster=<CLUSTER> --location=<LOCATION> --service-account=<CUSTOM_SA>
+      then migrate workloads and delete the old pool.
+    references:
+      - https://cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster#use_least_privilege_sa
+    notes: |
+      Node pools come from ctx.cluster.nodePools, so no extra collection is needed. Autopilot clusters
+      are filtered out (Google manages the node service account). "Least privilege" of a custom SA needs
+      organization context: broad roles fail outright, roles outside approved_node_roles produce REVIEW.
+
+  - id: cis-gke-5.2.2
+    ref: "5.2.2"
+    title: Use dedicated Kubernetes service accounts with Workload Identity Federation for GKE
+    profile: L2
+    cis_assessment: manual
+    mode: deterministic
+    severity: high
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    check:
+      assert: |
+        ctx.cluster.?autopilot.?enabled.orValue(false)
+        || (
+          ctx.cluster.?workloadIdentityConfig.?workloadPool.orValue("").endsWith(".svc.id.goog")
+          && r.?config.?workloadMetadataConfig.?mode.orValue("") == "GKE_METADATA"
+        )
+      message: "Node pool {{ .r.name }} cannot serve Workload Identity Federation for GKE: the cluster has no workload pool or the node pool does not run the GKE metadata server (GKE_METADATA)"
+    evidence:
+      - ctx.cluster.workloadIdentityConfig.workloadPool
+      - r.config.workloadMetadataConfig.mode
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --workload-pool=<PROJECT_ID>.svc.id.goog
+      gcloud container node-pools update <POOL> --cluster=<CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --workload-metadata=GKE_METADATA
+      then run each workload that calls Google Cloud APIs as a dedicated Kubernetes service account granted only the IAM roles it needs.
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity
+    notes: |
+      CIS marks this Manual because "dedicated Kubernetes service accounts for workloads that call Google
+      APIs" needs workload knowledge. The API-observable prerequisites are checked deterministically per node
+      pool: the cluster has a Workload Identity pool (workloadIdentityConfig.workloadPool ending in
+      .svc.id.goog; CIS expects <PROJECT_ID>.svc.id.goog, and any such pool is accepted so clusters using a
+      fleet host project pool are not penalised) and the node pool runs the GKE metadata server
+      (config.workloadMetadataConfig.mode == GKE_METADATA). The cluster field is part of the assert, so every
+      node pool fails when the cluster has no pool. Autopilot clusters pass because Workload Identity
+      Federation is always on there. Out of API reach: which pods call Google APIs, whether they use a
+      dedicated KSA rather than the namespace default, mounted service account keys, and IAM grants to KSA
+      principals on target resources. 5.4.1 checks the same node pool setting for metadata protection.
+
+  - id: cis-gke-5.3.1
+    ref: "5.3.1"
+    title: Enable application-layer Secrets encryption with Cloud KMS keys
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    params:
+      encrypted_states: [ENCRYPTED, ALL_OBJECTS_ENCRYPTION_ENABLED]
+    check:
+      assert: |
+        ctx.cluster.?databaseEncryption.?state.orValue("DECRYPTED") in params.encrypted_states
+        && ctx.cluster.?databaseEncryption.?keyName.orValue("") != ""
+        && ctx.cluster.?databaseEncryption.?currentState.orValue("CURRENT_STATE_UNSPECIFIED") in [
+             "CURRENT_STATE_UNSPECIFIED",
+             "CURRENT_STATE_ENCRYPTED",
+             "CURRENT_STATE_ALL_OBJECTS_ENCRYPTION_ENABLED"
+           ]
+      message: "Application-layer Secrets encryption with a Cloud KMS key is not enabled on this cluster, or it is pending or failed (databaseEncryption state, currentState or keyName)"
+    evidence: [ctx.cluster.databaseEncryption]
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --database-encryption-key=projects/<KEY_PROJECT>/locations/<LOCATION>/keyRings/<KEY_RING>/cryptoKeys/<KEY>
+      (first grant roles/cloudkms.cryptoKeyEncrypterDecrypter on the key to service-<PROJECT_NUMBER>@container-engine-robot.iam.gserviceaccount.com)
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/encrypting-secrets
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/using-cmek
+    notes: |
+      Aggregate rule on ctx.cluster.databaseEncryption, replacing the per-cluster describe in the CIS audit.
+      Passes when state is in encrypted_states, keyName names a Cloud KMS key, and currentState (when
+      reported) is a settled encrypted state. DECRYPTED, *_PENDING and *_ERROR values fail because CIS treats
+      transitional values as not configured, so a key rotation in progress fails until it settles. The CIS
+      audit text expects ALL_OBJECTS_ENCRYPTION_ENABLED while the title covers Secrets, so the default
+      accepts ENCRYPTED and ALL_OBJECTS_ENCRYPTION_ENABLED; set encrypted_states to
+      [ALL_OBJECTS_ENCRYPTION_ENABLED] to require all-object encryption. Encryption is off by default, so a
+      missing block fails. Whether keyName is the organization's approved key is not judged; it is kept as
+      evidence. Applies to Standard and Autopilot clusters.
+
+  - id: cis-gke-5.4.1
+    ref: "5.4.1"
+    title: Enable GKE metadata server on Standard node pools
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: high
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    check:
+      assert: |
+        r.?config.?workloadMetadataConfig.?mode.orValue("") == "GKE_METADATA"
+        && r.?config.?metadata[?"disable-legacy-endpoints"].orValue("true").lowerAscii() == "true"
+      message: "Node pool {{ .r.name }} does not run the GKE metadata server (workloadMetadataConfig.mode is not GKE_METADATA) or sets disable-legacy-endpoints to a value other than true"
+    evidence:
+      - r.config.workloadMetadataConfig
+      - 'r.config.metadata["disable-legacy-endpoints"]'
+      - ctx.cluster.workloadIdentityConfig.workloadPool
+    remediation: |
+      gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --workload-pool=<PROJECT_ID>.svc.id.goog
+      gcloud container node-pools update <POOL> --cluster=<CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --workload-metadata=GKE_METADATA
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster
+    notes: |
+      Replaces the per-cluster node-pools list in the CIS audit. Each Standard node pool must report
+      config.workloadMetadataConfig.mode == GKE_METADATA; GCE_METADATA, MODE_UNSPECIFIED or a missing value
+      fails, as CIS treats blank as non-compliant. GKE only accepts GKE_METADATA on clusters with a Workload
+      Identity pool, so the cluster-level prerequisite is implied; the pool is kept as evidence. When a node
+      pool sets the disable-legacy-endpoints metadata key it must be "true". Autopilot clusters are filtered
+      out because Google always runs the GKE metadata server there (NOT_APPLICABLE). Pods with
+      hostNetwork: true bypass the GKE metadata server and are not evaluated.
+
+  - id: cis-gke-5.5.1
+    ref: "5.5.1"
+    title: Use COS_CONTAINERD node images for GKE node pools
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      filter: |
+        !ctx.cluster.?autopilot.?enabled.orValue(false)
+        && !r.?config.?imageType.orValue("").upperAscii().startsWith("WINDOWS")
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    params:
+      allowed_image_types: [COS_CONTAINERD]
+    check:
+      assert: r.?config.?imageType.orValue("COS_CONTAINERD").upperAscii() in params.allowed_image_types
+      message: "Node pool {{ .r.name }} uses an image type outside allowed_image_types {{ .params.allowed_image_types }}"
+    evidence: [r.config.imageType]
+    remediation: gcloud container clusters upgrade <CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --node-pool=<POOL> --image-type=COS_CONTAINERD
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-images
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/node-images
+    notes: |
+      Replaces the per-cluster node-pools list in the CIS audit. Each Linux node pool's config.imageType must
+      be in allowed_image_types (default COS_CONTAINERD); a missing imageType passes because GKE defaults to
+      COS_CONTAINERD. Values are upper-cased before comparison, so list them in upper case. Windows node pools
+      (imageType starting with WINDOWS) are filtered out because they cannot use Container-Optimized OS, and
+      Autopilot clusters are filtered out because Google manages the node image there. Ubuntu node pools with
+      a documented workload requirement should be exempted in the profile, or UBUNTU_CONTAINERD added to
+      allowed_image_types.
+
+  - id: cis-gke-5.5.2
+    ref: "5.5.2"
+    title: Verify node auto-repair is enabled for GKE node pools
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    check:
+      assert: r.?management.?autoRepair.orValue(false)
+      message: "Node pool {{ .r.name }} does not have node auto-repair enabled"
+    evidence: [r.management]
+    remediation: gcloud container node-pools update <POOL> --cluster=<CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --enable-autorepair
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/node-auto-repair
+      - https://docs.cloud.google.com/kubernetes-engine/docs/reference/rest/v1/NodeManagement
+    notes: |
+      Replaces the per-node-pool describe in the CIS audit. management.autoRepair must be true; false or
+      missing fails, as in CIS (the API omits false booleans, so absence means disabled even though new node
+      pools default to enabled). Autopilot clusters are filtered out because Google always repairs Autopilot
+      nodes (NOT_APPLICABLE).
+
+  - id: cis-gke-5.5.3
+    ref: "5.5.3"
+    title: Verify node auto-upgrade is enabled for GKE node pools
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    check:
+      assert: r.?management.?autoUpgrade.orValue(false)
+      message: "Node pool {{ .r.name }} does not have node auto-upgrade enabled"
+    evidence: [r.management, ctx.cluster.releaseChannel]
+    remediation: gcloud container node-pools update <POOL> --cluster=<CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --enable-autoupgrade
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/node-auto-upgrades
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/cluster-upgrades
+    notes: |
+      Replaces the per-node-pool describe in the CIS audit. management.autoUpgrade must be true; false or
+      missing fails, as in CIS (the API omits false booleans). Node pools of clusters enrolled in a release
+      channel cannot turn auto-upgrade off, so findings mostly concern clusters without a channel (see 5.5.4).
+      Autopilot clusters are filtered out because Google always upgrades Autopilot nodes (NOT_APPLICABLE).
+      Maintenance windows and exclusions are not evaluated.
+
+  - id: cis-gke-5.5.4
+    ref: "5.5.4"
+    title: Enroll GKE clusters in release channels for automated version management
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    params:
+      allowed_channels: [RAPID, REGULAR, STABLE, EXTENDED]
+    check:
+      assert: ctx.cluster.?releaseChannel.?channel.orValue("UNSPECIFIED") in params.allowed_channels
+      message: "Cluster is not enrolled in a release channel from allowed_channels {{ .params.allowed_channels }}"
+    evidence: [ctx.cluster.releaseChannel]
+    remediation: gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --release-channel=regular
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/concepts/release-channels
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/release-channels
+    notes: |
+      Aggregate rule on ctx.cluster.releaseChannel.channel, replacing the per-cluster describe in the CIS
+      audit. A missing release channel or UNSPECIFIED ("No channel") fails. The default allowed_channels
+      accepts every channel, which is the deterministic baseline (enrolled at all); set it to
+      [REGULAR, STABLE] to enforce the CIS guidance that RAPID and EXTENDED need a documented requirement.
+      Autopilot clusters are always enrolled and are evaluated the same way.
+
+  - id: cis-gke-5.5.5
+    ref: "5.5.5"
+    title: Verify Shielded GKE Nodes are enabled for GKE clusters
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    check:
+      assert: |
+        ctx.cluster.?autopilot.?enabled.orValue(false)
+        || ctx.cluster.?shieldedNodes.?enabled.orValue(false)
+      message: "Shielded GKE Nodes are not enabled on this cluster (shieldedNodes.enabled is false or missing)"
+    evidence: [ctx.cluster.shieldedNodes]
+    remediation: gcloud container clusters update <CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --enable-shielded-nodes
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/shielded-gke-nodes
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/hardening-your-cluster
+    notes: |
+      Aggregate rule on ctx.cluster.shieldedNodes.enabled, replacing the per-cluster describe in the CIS
+      audit; false or missing fails, as in CIS (the API omits false booleans even though new clusters default
+      to enabled). Autopilot clusters pass because Shielded GKE Nodes are always on there and cannot be
+      disabled. Node-level integrity monitoring and Secure Boot are checked by 5.5.6 and 5.5.7.
+
+  - id: cis-gke-5.5.6
+    ref: "5.5.6"
+    title: Verify Shielded GKE Node integrity monitoring is enabled
+    profile: L1
+    cis_assessment: automated
+    mode: deterministic
+    severity: medium
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    check:
+      assert: r.?config.?shieldedInstanceConfig.?enableIntegrityMonitoring.orValue(false)
+      message: "Node pool {{ .r.name }} does not have Shielded GKE Node integrity monitoring enabled"
+    evidence: [r.config.shieldedInstanceConfig]
+    remediation: gcloud container node-pools create <POOL> --cluster=<CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --shielded-integrity-monitoring (then migrate workloads and delete the old pool)
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/shielded-gke-nodes
+      - https://docs.cloud.google.com/kubernetes-engine/docs/reference/rest/v1/ShieldedInstanceConfig
+    notes: |
+      Replaces the per-node-pool describe in the CIS audit. config.shieldedInstanceConfig.enableIntegrityMonitoring
+      must be true; false or missing fails, as in CIS (the API omits false booleans even though new node pools
+      default to enabled). Secure Boot is judged separately by 5.5.7. Autopilot clusters are filtered out because
+      Google manages Shielded node settings there (NOT_APPLICABLE).
+
+  - id: cis-gke-5.5.7
+    ref: "5.5.7"
+    title: Ensure Secure Boot is enabled for Shielded GKE node pools
+    profile: L2
+    cis_assessment: automated
+    mode: deterministic
+    severity: low
+    scope: cluster
+    services: [container.googleapis.com]
+    resource:
+      from: ctx.cluster.?nodePools.orValue([])
+      filter: "!ctx.cluster.?autopilot.?enabled.orValue(false)"
+      kind: container.googleapis.com/NodePool
+      name: ctx.cluster.name + "/" + r.name
+    check:
+      assert: r.?config.?shieldedInstanceConfig.?enableSecureBoot.orValue(false)
+      message: "Node pool {{ .r.name }} does not have Secure Boot enabled"
+    evidence: [r.config.shieldedInstanceConfig, r.config.imageType]
+    remediation: gcloud container node-pools create <POOL> --cluster=<CLUSTER> --location=<LOCATION> --project=<PROJECT_ID> --shielded-secure-boot (then migrate workloads and delete the old pool)
+    references:
+      - https://docs.cloud.google.com/kubernetes-engine/docs/how-to/shielded-gke-nodes
+      - https://docs.cloud.google.com/kubernetes-engine/docs/reference/rest/v1/ShieldedInstanceConfig
+    notes: |
+      Replaces the per-node-pool describe in the CIS audit. config.shieldedInstanceConfig.enableSecureBoot must
+      be true; Secure Boot is off by default, so false or missing fails. Autopilot clusters are filtered out
+      because Google manages Shielded node settings there (NOT_APPLICABLE). Ubuntu node pools that must load
+      unsigned third-party kernel modules cannot use Secure Boot; exempt them in the profile with the reason.
